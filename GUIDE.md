@@ -30,7 +30,7 @@
 ```bash
 git clone https://github.com/Gousting/conv-edit.git
 cd conv-edit
-pip install fastapi uvicorn librosa scipy ruptures httpx
+pip install fastapi uvicorn librosa scipy ruptures httpx python-multipart
 ```
 
 ### 2.2 安装 ffmpeg
