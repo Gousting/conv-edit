@@ -1236,6 +1236,91 @@ async def auto_select(data: dict):
         raise HTTPException(500, f"Auto-select failed: {e}")
 
 
+@app.post("/api/auto-select-stream")
+async def auto_select_stream(data: dict):
+    """SSE-streaming version of auto-select with real-time progress updates."""
+    from fastapi.responses import StreamingResponse
+    import asyncio
+    
+    config = _load_llm_config()
+    
+    async def event_stream():
+        session_id = data.get("session_id")
+        bgm_id = data.get("bgm_id")
+        style_hint = data.get("style_hint", "")
+        
+        if session_id not in SESSIONS:
+            yield f"data: {json.dumps({'step': 'error', 'msg': 'Session not found'})}\n\n"
+            return
+        
+        session = SESSIONS[session_id]
+        scenes = session["scenes"]
+        
+        # Build BGM context
+        bgm_info = None
+        if bgm_id and bgm_id in BGM_SESSIONS:
+            bgm = BGM_SESSIONS[bgm_id]
+            bgm_info = {"bpm": bgm.get("bpm", 120), "duration_sec": bgm.get("duration_sec", 60),
+                        "segments": [{"label": s["label"], "start": s["start_sec"],
+                                      "end": s["end_sec"], "energy": s.get("energy", 0.5)}
+                                     for s in bgm.get("segments", [])]}
+        
+        review_scenes = scenes[:20]
+        
+        # Build messages
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": _build_autoselect_prompt(review_scenes, style_hint, bgm_info)},
+        ]}]
+        
+        thumb_count = 0
+        for s in review_scenes[:8]:
+            thumb = s.get("thumbnail_b64", "")
+            if thumb and thumb.startswith("data:image") and len(thumb) < 150000:
+                messages[0]["content"].append({"type": "image_url", "image_url": {"url": thumb}})
+                thumb_count += 1
+        
+        model_name = config.get("vision_model", config.get("llm_model", "unknown"))
+        yield f"data: {json.dumps({'step': 'progress', 'msg': f'🔗 正在连接 {model_name}（{len(review_scenes)} 个镜头，{thumb_count} 张缩略图）...', 'pct': 10})}\n\n"
+        await asyncio.sleep(0.1)
+        
+        # Try vision model
+        result = None
+        try:
+            yield f"data: {json.dumps({'step': 'progress', 'msg': '⏳ 已发送请求，等待视觉模型回复...', 'pct': 25})}\n\n"
+            result = await _llm_chat(config, messages, model=model_name)
+        except Exception as e1:
+            yield f"data: {json.dumps({'step': 'progress', 'msg': f'⚠️ 视觉模型无响应，降级到纯文本模型...', 'pct': 30})}\n\n"
+            await asyncio.sleep(0.1)
+            try:
+                if len(messages[0]["content"]) > 1:
+                    messages[0]["content"] = [messages[0]["content"][0]]
+                txt_model = config.get("llm_model", "unknown")
+                yield f"data: {json.dumps({'step': 'progress', 'msg': f'⏳ 正在请求文本模型 ({txt_model})...', 'pct': 35})}\n\n"
+                result = await _llm_chat(config, messages)
+            except Exception as e2:
+                yield f"data: {json.dumps({'step': 'progress', 'msg': '⚠️ 文本模型也无响应，使用规则选片...', 'pct': 40})}\n\n"
+                await asyncio.sleep(0.1)
+                parsed = _rule_based_select(review_scenes, style_hint, bgm_info)
+                final = _apply_autoselect(session, scenes, parsed)
+                yield f"data: {json.dumps({'step': 'progress', 'msg': '📋 规则选片完成', 'pct': 80})}\n\n"
+                await asyncio.sleep(0.1)
+                yield f"data: {json.dumps({'step': 'done', 'result': final})}\n\n"
+                return
+        
+        yield f"data: {json.dumps({'step': 'progress', 'msg': '📋 正在解析 LLM 回复...', 'pct': 70})}\n\n"
+        await asyncio.sleep(0.1)
+        
+        parsed = _parse_autoselect_result(result, review_scenes)
+        final = _apply_autoselect(session, scenes, parsed)
+        
+        selected_n = len(parsed["selected_indices"])
+        yield f"data: {json.dumps({'step': 'progress', 'msg': f'✅ 选中 {selected_n} 个片段', 'pct': 95})}\n\n"
+        await asyncio.sleep(0.1)
+        yield f"data: {json.dumps({'step': 'done', 'result': final})}\n\n"
+    
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 def _apply_autoselect(session: dict, all_scenes: list[dict], parsed: dict) -> dict:
     """Apply auto-select results to session scenes."""
     for s in all_scenes:
