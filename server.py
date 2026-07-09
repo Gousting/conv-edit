@@ -951,13 +951,15 @@ async def get_presets():
 
 @app.post("/api/auto-select")
 async def auto_select(data: dict):
-    """LLM/VLM auto-selects clips + recommends editing style."""
+    """LLM/VLM auto-selects clips + recommends editing style.
+    If bgm_id is provided, BGM characteristics influence selection."""
     config = _load_llm_config()
     if not config.get("enabled"):
         raise HTTPException(400, "LLM not enabled")
 
     session_id = data.get("session_id")
-    style_hint = data.get("style_hint", "")  # e.g. "gaming", "vlog", or free text
+    bgm_id = data.get("bgm_id")            # optional — if present, BGM-aware selection
+    style_hint = data.get("style_hint", "")
     if session_id not in SESSIONS:
         raise HTTPException(404, "Session not found")
 
@@ -966,12 +968,23 @@ async def auto_select(data: dict):
     if not scenes:
         raise HTTPException(400, "No scenes to review")
 
-    # Build prompt with scene metadata + thumbnails (up to 20 scenes)
+    # Build BGM context if available
+    bgm_info = None
+    if bgm_id and bgm_id in BGM_SESSIONS:
+        bgm = BGM_SESSIONS[bgm_id]
+        bgm_info = {
+            "bpm": bgm.get("bpm", 120),
+            "duration_sec": bgm.get("duration_sec", 60),
+            "segments": [{"label": s["label"], "start": s["start_sec"],
+                          "end": s["end_sec"], "energy": s.get("energy", 0.5)}
+                         for s in bgm.get("segments", [])],
+        }
+
     review_scenes = scenes[:20]
     messages = [{
         "role": "user",
         "content": [
-            {"type": "text", "text": _build_autoselect_prompt(review_scenes, style_hint)},
+            {"type": "text", "text": _build_autoselect_prompt(review_scenes, style_hint, bgm_info)},
         ]
     }]
 
@@ -1014,15 +1027,35 @@ async def auto_select(data: dict):
         raise HTTPException(500, f"Auto-select failed: {e}")
 
 
-def _build_autoselect_prompt(scenes: list[dict], style_hint: str) -> str:
-    """Build prompt for LLM auto-selection."""
+def _build_autoselect_prompt(scenes: list[dict], style_hint: str, bgm_info: dict = None) -> str:
+    """Build prompt for LLM auto-selection, optionally BGM-aware."""
     style_text = f"用户想要的风格: {style_hint}" if style_hint else "请根据素材内容自动判断最合适的剪辑风格"
 
-    lines = [
-        f"{style_text}",
-        f"",
+    lines = [f"{style_text}", f""]
+
+    # BGM section
+    if bgm_info:
+        lines += [
+            "## 🎵 背景音乐分析",
+            f"- BPM: {bgm_info['bpm']:.0f}",
+            f"- 时长: {bgm_info['duration_sec']:.0f}s",
+            f"- 结构段落:",
+        ]
+        for seg in bgm_info["segments"]:
+            lines.append(f"  {seg['label']}: {seg['start']:.0f}s–{seg['end']:.0f}s (能量={seg['energy']:.2f})")
+        lines += [
+            "",
+            "**选片时请考虑 BGM 特征：**",
+            f"- BPM {bgm_info['bpm']:.0f} → {'快节奏，优先短切(1-3s)' if bgm_info['bpm'] > 120 else '舒缓，可选中长镜头(4-10s)' if bgm_info['bpm'] < 90 else '中等节奏'}",
+            "- 高能量段落(drop)需要足够多的高强度片段",
+            "- intro/outro 段配低强度过渡片段",
+            "- 确保总素材时长能覆盖 BGM 的关键段落",
+            "",
+        ]
+
+    lines += [
         f"以下是 {len(scenes)} 个镜头片段的信息：",
-        f"",
+        "",
         "| # | 时长 | 自动强度 | 音频模式 | 标签 |",
         "|---|---|---|---|---|",
     ]

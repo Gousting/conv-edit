@@ -1097,6 +1097,7 @@ async function smartSelect() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         session_id: state.sessionId,
+        bgm_id: state.bgmId || null,
         style_hint: presets[currentPreset]?.desc || ''
       })
     });
