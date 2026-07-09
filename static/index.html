@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conv-Edit 标注工作台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d0d14;color:#e0e0e0;overflow-x:hidden}
+.header{background:#14141f;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #252535;position:sticky;top:0;z-index:50}
+.header h1{font-size:16px;color:#fff}
+.header .status{font-size:11px;color:#888}
+.header .status.ok{color:#4caf50}
+.header .status.err{color:#e74c3c}
+.layout{display:flex;height:calc(100vh - 50px)}
+.panel-left{flex:1;overflow-y:auto;padding:16px;min-width:0}
+.panel-right{width:420px;border-left:1px solid #252535;overflow-y:auto;padding:16px;background:#10101a;display:flex;flex-direction:column;gap:12px}
+
+.upload-zone{border:2px dashed #2a2a3a;border-radius:10px;padding:24px;text-align:center;cursor:pointer;transition:all .3s;margin-bottom:12px}
+.upload-zone:hover,.upload-zone.dragover{border-color:#6c5ce7;background:rgba(108,92,231,0.05)}
+.upload-zone input{display:none}
+.upload-zone .icon{font-size:36px;margin-bottom:8px}
+.upload-zone p{color:#777;font-size:12px}
+
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;min-height:36px}
+.toolbar button{padding:6px 14px;border:none;border-radius:6px;cursor:pointer;font-size:12px;transition:all .2s}
+.toolbar button:active{transform:scale(0.96)}
+.btn-primary{background:#6c5ce7;color:#fff}
+.btn-primary:hover{background:#7d6ff0}
+.btn-secondary{background:#252535;color:#ccc}
+.btn-secondary:hover{background:#30304a}
+.btn-success{background:#27ae60;color:#fff}
+.btn-success:hover{background:#2ecc71}
+.btn-danger{background:#c0392b;color:#fff}
+.btn-sm{padding:4px 10px;font-size:11px}
+.badge{font-size:10px;padding:2px 8px;border-radius:10px;background:#252535;color:#aaa}
+.badge.auto{background:rgba(108,92,231,0.15);color:#8b7cf0}
+.batch-bar{display:none;background:#1a1a2e;border:1px solid #6c5ce7;border-radius:8px;padding:8px 12px;margin-bottom:12px;align-items:center;gap:8px;flex-wrap:wrap}
+.batch-bar.active{display:flex}
+.batch-bar span{font-size:11px;color:#aaa;white-space:nowrap}
+.batch-bar select,.batch-bar input{background:#0d0d14;border:1px solid #333;color:#ccc;padding:4px 8px;border-radius:4px;font-size:11px}
+
+.scene-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+.scene-card{background:#151520;border-radius:8px;overflow:hidden;border:2px solid transparent;cursor:pointer;transition:all .15s;position:relative}
+.scene-card:hover{border-color:#333}
+.scene-card.selected{border-color:#6c5ce7;box-shadow:0 0 12px rgba(108,92,231,0.15)}
+.scene-card.multi-selected{border-color:#8b7cf0;box-shadow:0 0 8px rgba(139,124,240,0.2)}
+.scene-card.deselected{opacity:0.35}
+.scene-card .check{position:absolute;top:6px;left:6px;width:20px;height:20px;border-radius:4px;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;font-size:12px;z-index:2;transition:all .2s}
+.scene-card.multi-selected .check{background:#6c5ce7;color:#fff}
+.scene-card .thumb{width:100%;height:120px;object-fit:cover;background:#111;position:relative}
+.scene-card .thumb .time-badge{position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.85);padding:1px 6px;border-radius:4px;font-size:10px;color:#aaa}
+.scene-card .info{padding:8px}
+.scene-card .info .time-row{display:flex;justify-content:space-between;font-size:10px;color:#777;margin-bottom:4px}
+.scene-card .attr-row{display:flex;gap:6px;align-items:center;margin:3px 0;font-size:10px}
+.scene-card .attr-row .label{color:#666;min-width:28px}
+.scene-card .attr-row .val{color:#ccc;display:flex;align-items:center;gap:3px}
+.scene-card .attr-row .auto-icon{font-size:10px;opacity:0.6;cursor:help}
+.scene-card .attr-row select,.scene-card .attr-row input{background:#0d0d14;border:1px solid #333;color:#ccc;padding:2px 4px;border-radius:3px;font-size:10px}
+.scene-card .dots{display:flex;gap:2px;align-items:center}
+.scene-card .dot{width:7px;height:7px;border-radius:50%;background:#333;cursor:pointer;transition:all .15s}
+.scene-card .dot.active{background:#6c5ce7}
+.scene-card .dot.user-set{box-shadow:0 0 0 1px #fff3}
+.scene-card .tag-row{display:flex;gap:3px;flex-wrap:wrap;margin-top:4px}
+.scene-card .tag{background:#252535;padding:1px 7px;border-radius:8px;font-size:9px;color:#999}
+.scene-card .tag.protect-tag{background:rgba(231,76,60,0.15);color:#e74c3c}
+.scene-card .actions{display:flex;gap:3px;padding:5px 8px;border-top:1px solid #1e1e2e}
+.scene-card .actions button{flex:1;padding:3px;border:none;border-radius:4px;background:#1e1e2e;color:#aaa;cursor:pointer;font-size:10px;transition:all .15s}
+.scene-card .actions button:hover{background:#2a2a3a}
+.scene-card .actions button.preview-btn{color:#6c5ce7}
+
+.loading{text-align:center;padding:40px;color:#888}
+.spinner{display:inline-block;width:28px;height:28px;border:3px solid #252535;border-top-color:#6c5ce7;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.bgm-section{background:#151520;border-radius:8px;padding:12px}
+.bgm-section h3{font-size:13px;color:#aaa;margin-bottom:8px}
+.bgm-upload{border:1px dashed #333;border-radius:8px;padding:16px;text-align:center;cursor:pointer;font-size:11px;color:#777;transition:all .2s}
+.bgm-upload:hover{border-color:#6c5ce7;color:#aaa}
+.bgm-upload input{display:none}
+.bgm-info{font-size:11px;color:#aaa}
+.bgm-info .bpm{font-size:28px;font-weight:700;color:#6c5ce7}
+.waveform-container{background:#0d0d14;border-radius:6px;overflow:hidden;margin-top:8px;position:relative;height:80px}
+.waveform-container canvas{width:100%;height:100%}
+.beat-marker{position:absolute;top:0;width:1px;height:100%;background:rgba(108,92,231,0.4)}
+
+.timeline-section{background:#151520;border-radius:8px;padding:12px;flex:1;min-height:200px}
+.timeline-section h3{font-size:13px;color:#aaa;margin-bottom:8px}
+.timeline-heatmap{display:flex;height:32px;border-radius:4px;overflow:hidden;gap:1px;margin-bottom:8px}
+.timeline-heatmap .block{flex:1;min-width:2px;border-radius:1px;transition:all .1s;cursor:pointer}
+.timeline-heatmap .block:hover{outline:1px solid #fff}
+.timeline-labels{display:flex;justify-content:space-between;font-size:9px;color:#555;margin-bottom:8px}
+.timeline-segs{max-height:180px;overflow-y:auto;font-size:10px}
+.timeline-segs .tseg{padding:3px 6px;border-radius:3px;margin:2px 0;display:flex;justify-content:space-between;align-items:center}
+.timeline-segs .tseg:hover{background:#1a1a2e}
+.timeline-segs .tseg .tseg-id{color:#888;width:60px;overflow:hidden;text-overflow:ellipsis}
+.timeline-segs .tseg .tseg-time{color:#666}
+.timeline-segs .tseg.warn{background:rgba(243,156,18,0.1);border-left:2px solid #f39c12}
+.timeline-segs .tseg.err{background:rgba(231,76,60,0.1);border-left:2px solid #e74c3c}
+
+.issue-list{font-size:10px;max-height:120px;overflow-y:auto}
+.issue-list .iss{padding:4px 8px;margin:2px 0;border-radius:4px}
+.issue-list .iss.err{background:rgba(231,76,60,0.1);color:#e74c3c}
+.issue-list .iss.warn{background:rgba(243,156,18,0.1);color:#f39c12}
+
+.preview-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.92);z-index:100;justify-content:center;align-items:center}
+.preview-modal.active{display:flex}
+.preview-modal video{max-width:90%;max-height:80%}
+.preview-modal .close{position:absolute;top:20px;right:20px;color:#fff;font-size:32px;cursor:pointer}
+
+.render-status{padding:8px;border-radius:6px;font-size:11px;text-align:center;display:none}
+.render-status.active{display:block}
+.render-status.rendering{background:rgba(108,92,231,0.1);color:#8b7cf0}
+.render-status.done{background:rgba(39,174,96,0.1);color:#2ecc71}
+.render-status.err{background:rgba(231,76,60,0.1);color:#e74c3c}
+
+@media(max-width:900px){.layout{flex-direction:column}.panel-right{width:100%;max-height:50vh}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🎬 Conv-Edit</h1>
+  <div class="status" id="status">拖拽视频开始</div>
+</div>
+
+<div class="layout">
+  <!-- LEFT: Video + Scenes -->
+  <div class="panel-left">
+    <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+      <input type="file" id="fileInput" accept="video/*">
+      <div class="icon">📁</div>
+      <p>点击或拖拽视频文件<br><small>MP4 / MKV / MOV</small></p>
+    </div>
+
+    <div class="batch-bar" id="batchBar">
+      <span id="batchCount">已选 0 个</span>
+      <select onchange="batchSetAudioMode(this.value)"><option value="">音频模式…</option><option value="突出人声">突出人声</option><option value="融入BGM">融入BGM</option><option value="纯BGM">纯BGM</option></select>
+      <button class="btn-sm btn-secondary" onclick="batchQuickIntensity('high')">🔥 高能</button>
+      <button class="btn-sm btn-secondary" onclick="batchQuickIntensity('mid')">⚡ 中等</button>
+      <button class="btn-sm btn-secondary" onclick="batchQuickIntensity('low')">🌙 平淡</button>
+      <button class="btn-sm btn-secondary" onclick="batchTag()">+标签</button>
+      <button class="btn-sm btn-danger" onclick="batchDeselect()">取消全选</button>
+    </div>
+
+    <div class="toolbar" id="toolbar" style="display:none">
+      <button class="btn-primary" onclick="exportClips()">📋 导出</button>
+      <button class="btn-secondary" onclick="selectAll()">全选</button>
+      <button class="btn-secondary" onclick="deselectAll()">取消全选</button>
+      <span class="badge" id="infoBar"></span>
+    </div>
+
+    <div class="scene-grid" id="sceneGrid"></div>
+    <div class="loading" id="loading" style="display:none"><div class="spinner"></div><p>分析中...</p></div>
+  </div>
+
+  <!-- RIGHT: BGM + Timeline -->
+  <div class="panel-right" id="rightPanel">
+    <!-- BGM Section -->
+    <div class="bgm-section">
+      <h3>🎵 背景音乐</h3>
+      <div class="bgm-upload" id="bgmDrop" onclick="document.getElementById('bgmInput').click()">
+        <input type="file" id="bgmInput" accept="audio/*">
+        <span id="bgmPrompt">点击上传 BGM (mp3/wav)</span>
+      </div>
+      <div class="bgm-info" id="bgmInfo" style="display:none">
+        <span class="bpm" id="bgmBpm">--</span> BPM
+        <span style="margin-left:8px" id="bgmDur"></span>
+        <span style="margin-left:8px" id="bgmSegs"></span>
+      </div>
+      <div class="waveform-container" id="wfContainer" style="display:none">
+        <canvas id="wfCanvas"></canvas>
+      </div>
+    </div>
+
+    <!-- Plan button -->
+    <button class="btn-success" id="planBtn" style="display:none;width:100%;padding:10px" onclick="generatePlan()">
+      🎯 生成时间线
+    </button>
+
+    <!-- Timeline -->
+    <div class="timeline-section" id="tlSection" style="display:none">
+      <h3>📊 时间线预览</h3>
+      <div class="timeline-heatmap" id="heatmap"></div>
+      <div class="timeline-labels" id="tlLabels"><span>0:00</span><span></span></div>
+      <div class="timeline-segs" id="tlSegs"></div>
+      <div class="issue-list" id="issueList"></div>
+    </div>
+
+    <!-- Render -->
+    <button class="btn-primary" id="renderBtn" style="display:none;width:100%;padding:10px" onclick="renderVideo()">
+      🚀 渲染视频
+    </button>
+    <div class="render-status" id="renderStatus"></div>
+  </div>
+</div>
+
+<!-- Preview Modal -->
+<div class="preview-modal" id="previewModal">
+  <span class="close" onclick="closePreview()">✕</span>
+  <video id="previewVideo" controls autoplay></video>
+</div>
+
+<script>
+let state = {
+  sessionId: null, scenes: [], filename: '',
+  bgmId: null, bgm: null,
+  plan: null, planReady: false,
+  lastClicked: -1,  // for shift-click multi-select
+};
+
+// ═══════════════════════════════════════════════════
+//  Video Upload & Analysis
+// ═══════════════════════════════════════════════════
+
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); handleVideo(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', e => handleVideo(e.target.files[0]));
+
+async function handleVideo(file) {
+  if (!file) return;
+  setStatus('分析中...', '');
+  showLoading(true);
+  document.getElementById('sceneGrid').innerHTML = '';
+
+  let form = new FormData();
+  form.append('file', file);
+  form.append('threshold', '0.3');
+
+  try {
+    let resp = await fetch('/api/analyze', { method: 'POST', body: form });
+    let data = await resp.json();
+    state = { ...state, sessionId: data.session_id, scenes: data.scenes, filename: data.filename };
+    setStatus(`✅ ${data.scene_count} 镜头 · ${data.duration.toFixed(0)}s`, 'ok');
+    document.getElementById('toolbar').style.display = 'flex';
+    showLoading(false);
+    renderScenes();
+    updatePlanBtn();
+  } catch(e) {
+    setStatus('❌ ' + e.message, 'err');
+    showLoading(false);
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  Scene Rendering
+// ═══════════════════════════════════════════════════
+
+function renderScenes() {
+  if (!state.scenes.length) return;
+  let html = '';
+  state.scenes.forEach((s, i) => {
+    let sel = s.selected !== false;
+    let multi = s._multi ? 'multi-selected' : '';
+    let cls = sel ? `selected ${multi}` : 'deselected';
+    let dur = s.duration_sec;
+    let tags = (s.tags || []).map(t => {
+      let extra = t === 'protect_end' ? 'protect-tag' : '';
+      return `<span class="tag ${extra}" onclick="event.stopPropagation();removeTag(${i},'${t}')">${t} ✕</span>`;
+    }).join('');
+
+    // Stars for intensity
+    let stars = '';
+    for (let j = 1; j <= 5; j++) {
+      let a = j <= Math.round(s.intensity * 5) ? ' active' : '';
+      let u = s.intensity_auto === false ? ' user-set' : '';
+      stars += `<div class="dot${a}${u}" onclick="event.stopPropagation();setIntensity(${i},${j/5})" title="强度 ${j}/5"></div>`;
+    }
+
+    // Auto indicator
+    let intAuto = s.intensity_auto !== false
+      ? '<span class="auto-icon" title="自动检测">⚡</span>' : '';
+    let modeAuto = s.audio_mode_auto !== false
+      ? '<span class="auto-icon" title="自动检测">⚡</span>' : '';
+
+    // Protect indicator
+    let protectMark = s.protect_end ? ' 🔒' : '';
+
+    html += `
+    <div class="scene-card ${cls}" id="card-${i}" onclick="onCardClick(${i}, event)">
+      <div class="check">${s._multi ? '✓' : ''}</div>
+      <div class="thumb">
+        ${s.thumbnail_b64 ? `<img src="${s.thumbnail_b64}" style="width:100%;height:100%;object-fit:cover">` : ''}
+        <div class="time-badge">${dur.toFixed(1)}s</div>
+      </div>
+      <div class="info">
+        <div class="time-row">
+          <span>#${i+1}${protectMark}</span>
+          <span>${s.start_sec.toFixed(1)}s→${s.end_sec.toFixed(1)}s</span>
+        </div>
+        <div class="attr-row">
+          <span class="label">强度</span>
+          <span class="val"><span class="dots">${stars}</span>${intAuto}</span>
+        </div>
+        <div class="attr-row">
+          <span class="label">模式</span>
+          <span class="val">
+            <select onchange="event.stopPropagation();setAudioMode(${i},this.value)" onclick="event.stopPropagation()">
+              <option value="融入BGM" ${s.audio_mode==='融入BGM'?'selected':''}>融入BGM</option>
+              <option value="突出人声" ${s.audio_mode==='突出人声'?'selected':''}>突出人声</option>
+              <option value="纯BGM" ${s.audio_mode==='纯BGM'?'selected':''}>纯BGM</option>
+            </select>
+            ${modeAuto}
+          </span>
+        </div>
+        <div class="tag-row">
+          ${tags}
+          <input class="tag" placeholder="+标签" style="background:transparent;border:none;color:#888;width:50px"
+            onkeydown="if(event.key==='Enter'){event.stopPropagation();addTag(${i},this.value);this.value=''}">
+        </div>
+      </div>
+      <div class="actions">
+        <button onclick="event.stopPropagation();toggleSelect(${i})">${sel ? '✅' : '☐'} ${sel ? '已选' : '选择'}</button>
+        <button class="preview-btn" onclick="event.stopPropagation();previewScene(${i})">▶</button>
+        <button onclick="event.stopPropagation();toggleProtect(${i})" title="保护结尾" style="color:${s.protect_end?'#e74c3c':'#555'}">🔒</button>
+      </div>
+    </div>`;
+  });
+
+  document.getElementById('sceneGrid').innerHTML = html;
+  updateInfoBar();
+  updateBatchBar();
+}
+
+// ═══════════════════════════════════════════════════
+//  Multi-select
+// ═══════════════════════════════════════════════════
+
+function onCardClick(i, event) {
+  if (event.shiftKey && state.lastClicked >= 0) {
+    // Range select
+    let [a, b] = [state.lastClicked, i].sort((x,y) => x-y);
+    for (let j = a; j <= b; j++) state.scenes[j]._multi = true;
+  } else if (event.ctrlKey || event.metaKey) {
+    // Toggle single
+    state.scenes[i]._multi = !state.scenes[i]._multi;
+  } else {
+    // Single click: clear all multi, select only this
+    state.scenes.forEach(s => s._multi = false);
+    state.scenes[i]._multi = true;
+  }
+  state.lastClicked = i;
+  renderScenes();
+}
+
+function updateBatchBar() {
+  let multi = state.scenes.filter(s => s._multi);
+  let bar = document.getElementById('batchBar');
+  let cnt = document.getElementById('batchCount');
+  if (multi.length >= 2) {
+    bar.classList.add('active');
+    cnt.textContent = `已选 ${multi.length} 个`;
+  } else {
+    bar.classList.remove('active');
+  }
+}
+
+function batchSetAudioMode(mode) {
+  if (!mode) return;
+  state.scenes.forEach(s => { if (s._multi) { s.audio_mode = mode; s.audio_mode_auto = false; } });
+  renderScenes();
+}
+
+function batchQuickIntensity(level) {
+  let val = level === 'high' ? 0.9 : level === 'mid' ? 0.5 : 0.2;
+  state.scenes.forEach(s => { if (s._multi) { s.intensity = val; s.intensity_auto = false; } });
+  renderScenes();
+}
+
+function batchTag() {
+  let tag = prompt('批量添加标签:');
+  if (!tag || !tag.trim()) return;
+  state.scenes.forEach(s => { if (s._multi) { if (!s.tags) s.tags = []; s.tags.push(tag.trim()); } });
+  renderScenes();
+}
+
+function batchDeselect() {
+  state.scenes.forEach(s => s._multi = false);
+  renderScenes();
+}
+
+// ═══════════════════════════════════════════════════
+//  Single actions
+// ═══════════════════════════════════════════════════
+
+function toggleSelect(i) {
+  state.scenes[i].selected = state.scenes[i].selected === false ? true : false;
+  renderScenes();
+  updatePlanBtn();
+}
+
+function setIntensity(i, val) {
+  state.scenes[i].intensity = val;
+  state.scenes[i].intensity_auto = false;
+  renderScenes();
+}
+
+function setAudioMode(i, val) {
+  state.scenes[i].audio_mode = val;
+  state.scenes[i].audio_mode_auto = false;
+}
+
+function addTag(i, tag) {
+  if (!tag.trim()) return;
+  if (!state.scenes[i].tags) state.scenes[i].tags = [];
+  state.scenes[i].tags.push(tag.trim());
+  renderScenes();
+}
+
+function removeTag(i, tag) {
+  state.scenes[i].tags = state.scenes[i].tags.filter(t => t !== tag);
+  renderScenes();
+}
+
+function toggleProtect(i) {
+  state.scenes[i].protect_end = !state.scenes[i].protect_end;
+  if (state.scenes[i].protect_end && !state.scenes[i].tags.includes('protect_end')) {
+    state.scenes[i].tags.push('protect_end');
+  } else if (!state.scenes[i].protect_end) {
+    state.scenes[i].tags = state.scenes[i].tags.filter(t => t !== 'protect_end');
+  }
+  renderScenes();
+}
+
+function selectAll() { state.scenes.forEach(s => s.selected = true); renderScenes(); updatePlanBtn(); }
+function deselectAll() { state.scenes.forEach(s => s.selected = false); renderScenes(); updatePlanBtn(); }
+
+function updateInfoBar() {
+  let sel = state.scenes.filter(s => s.selected !== false);
+  let total = sel.reduce((sum, s) => sum + Math.max(0.1, s.duration_sec), 0);
+  document.getElementById('infoBar').textContent = `${sel.length}/${state.scenes.length} 片段 · ${total.toFixed(0)}s`;
+}
+
+// ═══════════════════════════════════════════════════
+//  Preview
+// ═══════════════════════════════════════════════════
+
+async function previewScene(i) {
+  try {
+    let resp = await fetch(`/api/preview/${state.sessionId}/${i}`);
+    let blob = await resp.blob();
+    let url = URL.createObjectURL(blob);
+    document.getElementById('previewVideo').src = url;
+    document.getElementById('previewModal').classList.add('active');
+  } catch(e) { alert('预览失败'); }
+}
+
+function closePreview() {
+  document.getElementById('previewModal').classList.remove('active');
+  document.getElementById('previewVideo').pause();
+}
+
+// ═══════════════════════════════════════════════════
+//  BGM Upload & Analysis
+// ═══════════════════════════════════════════════════
+
+const bgmDrop = document.getElementById('bgmDrop');
+const bgmInput = document.getElementById('bgmInput');
+bgmDrop.addEventListener('click', () => bgmInput.click());
+bgmDrop.addEventListener('dragover', e => { e.preventDefault(); bgmDrop.style.borderColor = '#6c5ce7'; });
+bgmDrop.addEventListener('dragleave', () => bgmDrop.style.borderColor = '#333');
+bgmDrop.addEventListener('drop', e => { e.preventDefault(); bgmDrop.style.borderColor = '#333'; handleBGM(e.dataTransfer.files[0]); });
+bgmInput.addEventListener('change', e => handleBGM(e.target.files[0]));
+
+async function handleBGM(file) {
+  if (!file) return;
+  document.getElementById('bgmPrompt').textContent = '分析 BGM...';
+  let form = new FormData();
+  form.append('file', file);
+  try {
+    let resp = await fetch('/api/analyze-bgm', { method: 'POST', body: form });
+    let data = await resp.json();
+    state.bgmId = data.bgm_id;
+    state.bgm = data;
+    document.getElementById('bgmPrompt').textContent = `✅ ${data.filename}`;
+    document.getElementById('bgmInfo').style.display = 'block';
+    document.getElementById('bgmBpm').textContent = Math.round(data.bpm);
+    document.getElementById('bgmDur').textContent = `· ${data.duration_sec.toFixed(0)}s`;
+    document.getElementById('bgmSegs').textContent = `· ${data.segments.length} 段落`;
+    drawWaveform(data);
+    updatePlanBtn();
+  } catch(e) {
+    document.getElementById('bgmPrompt').textContent = '❌ 分析失败: ' + e.message;
+  }
+}
+
+function drawWaveform(bgm) {
+  let container = document.getElementById('wfContainer');
+  container.style.display = 'block';
+  let canvas = document.getElementById('wfCanvas');
+  let rect = container.getBoundingClientRect();
+  canvas.width = rect.width;
+  canvas.height = 80;
+  let ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  let curve = bgm.energy_curve || [];
+  if (!curve.length) return;
+
+  let w = canvas.width, h = canvas.height;
+  let durSec = curve[curve.length - 1]?.time_sec || bgm.duration_sec;
+
+  // Draw energy bars
+  let barW = Math.max(2, w / curve.length);
+  curve.forEach((p, i) => {
+    let x = (p.time_sec / durSec) * w;
+    let barH = p.value * h * 0.9;
+    let hue = 260 - p.value * 200; // purple(high) → red(low)
+    ctx.fillStyle = `hsla(${hue}, 70%, ${40 + p.value * 30}%, 0.7)`;
+    ctx.fillRect(x, h - barH, barW, barH);
+  });
+
+  // Draw beat markers
+  let beats = bgm.beats_sec || [];
+  beats.forEach(b => {
+    let x = (b / durSec) * w;
+    ctx.strokeStyle = 'rgba(108,92,231,0.3)';
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+  });
+
+  // Draw segment boundaries
+  let segs = bgm.segments || [];
+  segs.forEach(s => {
+    let x = (s.start_sec / durSec) * w;
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '9px sans-serif';
+    ctx.fillText(s.label, x + 3, 12);
+  });
+}
+
+// ═══════════════════════════════════════════════════
+//  Plan Generation
+// ═══════════════════════════════════════════════════
+
+function updatePlanBtn() {
+  let hasVideo = state.sessionId && state.scenes.some(s => s.selected !== false);
+  let hasBGM = !!state.bgmId;
+  document.getElementById('planBtn').style.display = (hasVideo && hasBGM) ? 'block' : 'none';
+}
+
+async function generatePlan() {
+  if (!state.sessionId || !state.bgmId) return;
+  let btn = document.getElementById('planBtn');
+  btn.textContent = '⏳ 规划中...';
+  btn.disabled = true;
+
+  // Sync scene state to server first
+  let scenesData = state.scenes.map(s => ({
+    start_sec: s.start_sec, duration_sec: s.duration_sec,
+    selected: s.selected !== false,
+    trim_start: s.trim_start || 0,
+    trim_end: s.trim_end || s.duration_sec,
+    tags: s.tags || [], intensity: s.intensity || 0.5,
+    audio_mode: s.audio_mode || '融入BGM',
+    description: s.description || '',
+    protect_end: !!s.protect_end,
+    index: s.index,
+  }));
+  // Save to server's session
+  try {
+    await fetch(`/api/export/${state.sessionId}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({scenes: scenesData})
+    });
+  } catch(e) {}
+
+  try {
+    let resp = await fetch('/api/plan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        session_id: state.sessionId,
+        bgm_id: state.bgmId,
+        strategy: 'fit',
+        seed: Math.floor(Math.random() * 10000),
+        auto_offset: true,
+      })
+    });
+    let data = await resp.json();
+    state.plan = data.plan;
+    state.planReady = data.ready;
+
+    renderTimeline(data);
+    renderIssues(data);
+
+    btn.textContent = '🎯 重新规划';
+    btn.disabled = false;
+
+    document.getElementById('renderBtn').style.display = 'block';
+  } catch(e) {
+    btn.textContent = '❌ 规划失败';
+    btn.disabled = false;
+  }
+}
+
+function renderTimeline(data) {
+  document.getElementById('tlSection').style.display = 'block';
+
+  // Heatmap
+  let heat = document.getElementById('heatmap');
+  let heatmap = data.heatmap || [];
+  let totalDur = data.plan?.total_duration_sec || 30;
+  heat.innerHTML = heatmap.map(h => {
+    let dur = h.end - h.start;
+    let pct = (dur / totalDur * 100).toFixed(1);
+    let hue = 0 + h.intensity * 120; // red(low)→green(high)
+    let sat = 50 + h.intensity * 40;
+    let light = 25 + h.intensity * 30;
+    // Color-code by audio_mode
+    let bg = h.audio_mode === '纯BGM' ? `hsl(260,30%,${light}%)`
+           : h.audio_mode === '突出人声' ? `hsl(${hue},${sat}%,${light}%)`
+           : `hsl(${hue},${sat}%,${light}%)`;
+    return `<div class="block" style="flex:${pct};background:${bg}" title="${h.clip_id}: 强度${h.intensity.toFixed(1)} · ${h.audio_mode}"></div>`;
+  }).join('');
+
+  // Labels
+  let labels = document.getElementById('tlLabels');
+  labels.innerHTML = `<span>0:00</span><span>${totalDur.toFixed(0)}s</span>`;
+
+  // Segment list
+  let segs = document.getElementById('tlSegs');
+  let planSegs = data.plan?.segments || [];
+  segs.innerHTML = planSegs.map((s, i) => {
+    let cls = '';
+    let badge = '';
+    if (s.playback_speed && s.playback_speed !== 1.0) {
+      badge = `<span style="color:#f39c12">${((s.playback_speed-1)*100).toFixed(0)}%</span>`;
+    }
+    if (s.protect_end) badge += ' 🔒';
+    return `<div class="tseg${cls}">
+      <span class="tseg-id">${s.clip_id.slice(-8)}</span>
+      <span style="color:#888;font-size:9px">${s.audio_mode}</span>
+      <span class="tseg-time">${s.timeline_start.toFixed(1)}→${s.timeline_end.toFixed(1)}s</span>
+      <span style="font-size:9px;color:#aaa">强度${s.intensity?.toFixed(1)||'?'}</span>
+      ${badge}
+    </div>`;
+  }).join('');
+}
+
+function renderIssues(data) {
+  let list = document.getElementById('issueList');
+  let errors = data.errors || [];
+  let warnings = data.warnings || [];
+
+  let html = '';
+  errors.forEach(e => html += `<div class="iss err">❌ ${e.msg}${e.fix ? ' — '+e.fix : ''}</div>`);
+  warnings.forEach(w => html += `<div class="iss warn">⚠️ ${w.msg}${w.fix ? ' — '+w.fix : ''}</div>`);
+
+  if (!html) html = '<div style="color:#27ae60;font-size:10px;padding:8px">✅ 校验通过，可渲染</div>';
+  list.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════
+//  Render
+// ═══════════════════════════════════════════════════
+
+async function renderVideo() {
+  if (!state.plan) return;
+  let btn = document.getElementById('renderBtn');
+  let status = document.getElementById('renderStatus');
+  btn.disabled = true;
+  btn.textContent = '⏳ 渲染中...';
+  status.className = 'render-status active rendering';
+  status.textContent = '正在渲染，可能需要几分钟...';
+
+  try {
+    let resp = await fetch('/api/render', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ plan: state.plan })
+    });
+    if (!resp.ok) {
+      let err = await resp.json();
+      throw new Error(err.detail || '渲染失败');
+    }
+    let data = await resp.json();
+    status.className = 'render-status active done';
+    status.innerHTML = `✅ 渲染完成！<br><a href="${data.download_url}" download style="color:#2ecc71">📥 下载视频</a>`;
+    btn.textContent = '🔄 重新渲染';
+    btn.disabled = false;
+  } catch(e) {
+    status.className = 'render-status active err';
+    status.textContent = '❌ ' + e.message;
+    btn.textContent = '🚀 重试渲染';
+    btn.disabled = false;
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  Export
+// ═══════════════════════════════════════════════════
+
+async function exportClips() {
+  let scenesData = state.scenes.map(s => ({
+    start_sec: s.start_sec, duration_sec: s.duration_sec,
+    selected: s.selected !== false,
+    trim_start: s.trim_start || 0,
+    trim_end: s.trim_end || s.duration_sec,
+    tags: s.tags || [], intensity: s.intensity || 0.5,
+    audio_mode: s.audio_mode || '融入BGM',
+    description: s.description || '',
+    protect_end: !!s.protect_end,
+    index: s.index,
+  }));
+
+  try {
+    let resp = await fetch(`/api/export/${state.sessionId}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({scenes: scenesData})
+    });
+    let data = await resp.json();
+    let blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+    let url = URL.createObjectURL(blob);
+    let a = document.createElement('a');
+    a.href = url;
+    a.download = `clips_${state.filename.replace(/\.[^.]+$/, '')}.json`;
+    a.click();
+    setStatus(`✅ 导出 ${data.clip_count} 片段`, 'ok');
+  } catch(e) { alert('导出失败'); }
+}
+
+// ═══════════════════════════════════════════════════
+//  Helpers
+// ═══════════════════════════════════════════════════
+
+function setStatus(msg, cls) {
+  let el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status ' + cls;
+}
+
+function showLoading(show) {
+  document.getElementById('loading').style.display = show ? 'block' : 'none';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closePreview();
+    state.scenes.forEach(s => s._multi = false);
+    state.lastClicked = -1;
+    renderScenes();
+  }
+  if (e.key === 'a' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    if (state.scenes.every(s => s.selected)) deselectAll();
+    else selectAll();
+  }
+});
+</script>
+</body>
+</html>
