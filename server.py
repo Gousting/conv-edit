@@ -354,7 +354,10 @@ def get_video_duration(video_path: str) -> float:
         video_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-    return float(result.stdout.strip())
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def generate_thumbnail(video_path: str, time_sec: float, width: int = 320) -> str:

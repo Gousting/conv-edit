@@ -359,9 +359,13 @@ async function handleVideo(file) {
 
   try {
     let resp = await fetch('/api/analyze', { method: 'POST', body: form });
+    if (!resp.ok) {
+      let err = await resp.json().catch(() => ({detail: '分析失败'}));
+      throw new Error(err.detail || '分析失败');
+    }
     let data = await resp.json();
     state = { ...state, sessionId: data.session_id, scenes: data.scenes, filename: data.filename };
-    setStatus(`✅ ${data.scene_count} 镜头 · ${data.duration.toFixed(0)}s`, 'ok');
+    setStatus(`✅ ${data.scene_count} 镜头 · ${(data.duration || 0).toFixed(0)}s`, 'ok');
     document.getElementById('toolbar').style.display = 'flex';
     showLoading(false);
     renderScenes();
@@ -421,7 +425,7 @@ function renderScenes() {
       <div class="info">
         <div class="time-row">
           <span>#${i+1}${protectMark}</span>
-          <span>${s.start_sec.toFixed(1)}s→${s.end_sec.toFixed(1)}s</span>
+          <span>${(s.start_sec||0).toFixed(1)}s→${(s.end_sec||0).toFixed(1)}s</span>
         </div>
         <div class="attr-row">
           <span class="label">强度</span>
