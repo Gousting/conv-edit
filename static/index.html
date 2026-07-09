@@ -254,6 +254,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       🤖 智能选片
     </button>
 
+    <!-- Full Auto -->
+    <button class="btn-primary" id="fullAutoBtn" style="display:none;width:100%;padding:10px" onclick="fullAuto()">
+      🚀 全自动出片
+    </button>
+
     <!-- Plan button -->
     <button class="btn-success" id="planBtn" style="display:none;width:100%;padding:10px" onclick="generatePlan()">
       🎯 生成时间线
@@ -650,6 +655,74 @@ function updatePlanBtn() {
   let hasVideo = state.sessionId && state.scenes.some(s => s.selected !== false);
   let hasBGM = !!state.bgmId;
   document.getElementById('planBtn').style.display = (hasVideo && hasBGM) ? 'block' : 'none';
+  document.getElementById('fullAutoBtn').style.display = (hasVideo && hasBGM && llmConfig.enabled) ? 'block' : 'none';
+}
+
+async function fullAuto() {
+  if (!state.sessionId || !state.bgmId) return;
+  let btn = document.getElementById('fullAutoBtn');
+  btn.textContent = '⏳ 全自动处理中...';
+  btn.disabled = true;
+
+  // Step 1: Auto-select
+  try {
+    let r1 = await fetch('/api/auto-select', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ session_id: state.sessionId, bgm_id: state.bgmId,
+        style_hint: 'auto' })
+    });
+    if (r1.ok) { let d = await r1.json(); state.scenes = d.scenes; renderScenes(); }
+  } catch(e) {}
+
+  // Step 2: Generate plan
+  try {
+    let pp = getPresetParams();
+    await fetch(`/api/export/${state.sessionId}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({scenes: state.scenes.map(s => ({
+        start_sec: s.start_sec, duration_sec: s.duration_sec,
+        selected: s.selected !== false,
+        trim_start: s.trim_start || 0, trim_end: s.trim_end || s.duration_sec,
+        tags: s.tags || [], intensity: s.intensity || 0.5,
+        audio_mode: s.audio_mode || '融入BGM',
+        description: s.description || '', protect_end: !!s.protect_end, index: s.index,
+      }))})
+    });
+    let r2 = await fetch('/api/plan', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        session_id: state.sessionId, bgm_id: state.bgmId,
+        strategy: pp.strategy, seed: 42, auto_offset: true,
+        scale_mode: pp.scale_mode,
+      })
+    });
+    if (r2.ok) { let d = await r2.json(); state.plan = d.plan; state.planReady = d.ready;
+      renderTimeline(d); renderIssues(d); }
+  } catch(e) {}
+
+  // Step 3: Render
+  if (state.plan) {
+    try {
+      btn.textContent = '⏳ 渲染中...';
+      let r3 = await fetch('/api/render', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ plan: state.plan })
+      });
+      if (r3.ok) {
+        let d = await r3.json();
+        state.renderPath = d.output;
+        let status = document.getElementById('renderStatus');
+        status.className = 'render-status active done';
+        status.innerHTML = '✅ 全自动完成！<br><a href="' + d.download_url + '" download style="color:#2ecc71">📥 下载视频</a>';
+        document.getElementById('vlmReviewBtn').style.display = 'block';
+        btn.textContent = '✅ 完成！下载';
+        btn.disabled = false;
+        return;
+      }
+    } catch(e) {}
+  }
+  btn.textContent = '❌ 失败，重试';
+  btn.disabled = false;
 }
 
 async function generatePlan() {

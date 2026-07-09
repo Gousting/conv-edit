@@ -1201,7 +1201,8 @@ def _build_chat_system_prompt(scenes: list[dict], bgm_info: dict = None) -> str:
 - 回复简洁，2-4句话
 - 用中文
 - 不要一次性把所有事做完，等用户回复后再下一步
-- 用户说"行/可以/OK"就是确认"""
+- 用户说"行/可以/OK"就是确认
+- 用户说"全自动/一键出片/全部交给你"时：直接依次执行 auto-select → generate-plan → render，不追问"""
 
     return prompt
 
