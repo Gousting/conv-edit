@@ -114,6 +114,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .render-status.done{background:rgba(39,174,96,0.1);color:#2ecc71}
 .render-status.err{background:rgba(231,76,60,0.1);color:#e74c3c}
 
+.settings-toggle{cursor:pointer;font-size:12px;color:#888;user-select:none;display:flex;align-items:center;gap:4px}
+.settings-toggle:hover{color:#ccc}
+.settings-panel{display:none;background:#12121e;border-radius:8px;padding:12px;margin-bottom:8px}
+.settings-panel.open{display:block}
+.settings-panel label{font-size:10px;color:#777;display:block;margin:6px 0 2px}
+.settings-panel input,.settings-panel select{width:100%;background:#0d0d14;border:1px solid #333;color:#ccc;padding:5px 8px;border-radius:4px;font-size:11px;margin-bottom:4px}
+.settings-panel .toggle-row{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
+.settings-panel .switch{position:relative;width:36px;height:20px}
+.settings-panel .switch input{opacity:0;width:0;height:0}
+.settings-panel .switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#333;border-radius:20px;transition:.3s}
+.settings-panel .switch input:checked+.slider{background:#6c5ce7}
+.settings-panel .switch .slider:before{content:'';position:absolute;height:14px;width:14px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
+.settings-panel .switch input:checked+.slider:before{transform:translateX(16px)}
+.settings-panel .hint{font-size:9px;color:#555;margin:2px 0}
+
+.review-box{background:#12121e;border-radius:8px;padding:12px;margin-top:8px;display:none}
+.review-box.active{display:block}
+.review-box .review-text{font-size:11px;color:#ccc;white-space:pre-wrap;max-height:200px;overflow-y:auto;line-height:1.5}
+.review-box .review-meta{font-size:9px;color:#666;margin-bottom:4px}
+
 @media(max-width:900px){.layout{flex-direction:column}.panel-right{width:100%;max-height:50vh}}
 </style>
 </head>
@@ -156,6 +176,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
   <!-- RIGHT: BGM + Timeline -->
   <div class="panel-right" id="rightPanel">
+    <!-- LLM Settings -->
+    <div class="settings-toggle" onclick="toggleSettings()">⚙️ LLM 设置 ▾</div>
+    <div class="settings-panel" id="settingsPanel">
+      <div class="toggle-row">
+        <span style="font-size:11px;color:#ccc">启用 LLM 审查</span>
+        <label class="switch"><input type="checkbox" id="llmEnabled" onchange="saveSettings()"><span class="slider"></span></label>
+      </div>
+      <label>API 地址</label>
+      <input id="apiBase" value="http://localhost:11434/v1" onchange="saveSettings()" placeholder="http://host:port/v1">
+      <div class="hint">Ollama / vLLM / OpenAI 兼容接口</div>
+      <label>API Key <small style="color:#555">(可选)</small></label>
+      <input id="apiKey" type="password" onchange="saveSettings()" placeholder="sk-...">
+      <label>文本模型</label>
+      <input id="llmModel" value="qwen3.6:27b" onchange="saveSettings()" placeholder="模型名">
+      <div class="hint">用于审查时间线计划</div>
+      <label>视觉模型</label>
+      <input id="visionModel" value="minicpm-v:8b" onchange="saveSettings()" placeholder="视觉模型名">
+      <div class="hint">用于审查渲染成片画面</div>
+      <button class="btn-sm btn-secondary" style="width:100%;margin-top:8px" onclick="testLLM()">🔌 测试连接</button>
+      <span id="testResult" style="font-size:10px;margin-left:8px"></span>
+    </div>
+
     <!-- BGM Section -->
     <div class="bgm-section">
       <h3>🎵 背景音乐</h3>
@@ -173,9 +215,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       </div>
     </div>
 
+    <!-- Style Selector -->
+    <div id="styleSection" style="display:none">
+      <label style="font-size:11px;color:#888;margin-bottom:4px;display:block">🎬 剪辑风格</label>
+      <select id="stylePreset" onchange="onStyleChange()" style="width:100%;background:#151520;border:1px solid #333;color:#ccc;padding:6px 8px;border-radius:6px;font-size:12px">
+      </select>
+      <div id="styleDesc" style="font-size:10px;color:#555;margin:4px 0"></div>
+    </div>
+
+    <!-- Smart Select -->
+    <button class="btn-secondary" id="smartSelectBtn" style="display:none;width:100%;padding:8px" onclick="smartSelect()">
+      🤖 智能选片
+    </button>
+
     <!-- Plan button -->
     <button class="btn-success" id="planBtn" style="display:none;width:100%;padding:10px" onclick="generatePlan()">
       🎯 生成时间线
+    </button>
+
+    <!-- LLM Review -->
+    <button class="btn-secondary" id="llmReviewBtn" style="display:none;width:100%;padding:8px;margin-top:4px" onclick="llmReview()">
+      🤖 LLM 审查时间线
     </button>
 
     <!-- Timeline -->
@@ -192,6 +252,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       🚀 渲染视频
     </button>
     <div class="render-status" id="renderStatus"></div>
+
+    <!-- VLM Review -->
+    <button class="btn-secondary" id="vlmReviewBtn" style="display:none;width:100%;padding:8px;margin-top:4px" onclick="visionReview()">
+      👁️ 视觉模型审查成片
+    </button>
+
+    <!-- Review Results -->
+    <div class="review-box" id="llmReviewBox">
+      <div class="review-meta" id="llmReviewMeta"></div>
+      <div class="review-text" id="llmReviewText"></div>
+    </div>
+    <div class="review-box" id="vlmReviewBox">
+      <div class="review-meta" id="vlmReviewMeta"></div>
+      <div class="review-text" id="vlmReviewText"></div>
+    </div>
   </div>
 </div>
 
@@ -761,6 +836,307 @@ document.addEventListener('keydown', e => {
     else selectAll();
   }
 });
+
+// ═══════════════════════════════════════════════════
+//  LLM Settings & Review
+// ═══════════════════════════════════════════════════
+
+let llmConfig = { enabled: false, api_base: '', api_key: '', llm_model: '', vision_model: '' };
+
+async function loadSettings() {
+  try {
+    let r = await fetch('/api/llm-config');
+    llmConfig = await r.json();
+    document.getElementById('llmEnabled').checked = llmConfig.enabled;
+    document.getElementById('apiBase').value = llmConfig.api_base || '';
+    document.getElementById('apiKey').value = llmConfig.api_key || '';
+    document.getElementById('llmModel').value = llmConfig.llm_model || '';
+    document.getElementById('visionModel').value = llmConfig.vision_model || '';
+  } catch(e) {}
+}
+
+function toggleSettings() {
+  document.getElementById('settingsPanel').classList.toggle('open');
+}
+
+async function saveSettings() {
+  llmConfig.enabled = document.getElementById('llmEnabled').checked;
+  llmConfig.api_base = document.getElementById('apiBase').value;
+  llmConfig.api_key = document.getElementById('apiKey').value;
+  llmConfig.llm_model = document.getElementById('llmModel').value;
+  llmConfig.vision_model = document.getElementById('visionModel').value;
+  try {
+    await fetch('/api/llm-config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(llmConfig)
+    });
+  } catch(e) {}
+}
+
+async function testLLM() {
+  await saveSettings();
+  let el = document.getElementById('testResult');
+  el.textContent = '⏳ 测试中...';
+  try {
+    let r = await fetch('/api/llm-config');
+    let cfg = await r.json();
+    if (!cfg.enabled) { el.textContent = '❌ 未启用'; return; }
+    let resp = await fetch(cfg.api_base.replace(/\/+$/, '') + '/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cfg.api_key ? {'Authorization': 'Bearer ' + cfg.api_key} : {})
+      },
+      body: JSON.stringify({
+        model: cfg.llm_model,
+        messages: [{role:'user',content:'回复OK'}],
+        max_tokens: 5
+      })
+    });
+    if (resp.ok) { el.textContent = '✅ 连接成功'; }
+    else { let err = await resp.text(); el.textContent = '❌ ' + err.slice(0, 80); }
+  } catch(e) { el.textContent = '❌ ' + e.message.slice(0, 60); }
+}
+
+async function llmReview() {
+  if (!state.plan) return;
+  let btn = document.getElementById('llmReviewBtn');
+  let box = document.getElementById('llmReviewBox');
+  let meta = document.getElementById('llmReviewMeta');
+  let text = document.getElementById('llmReviewText');
+  btn.textContent = '⏳ 审查中...';
+  btn.disabled = true;
+  box.classList.add('active');
+  meta.textContent = '';
+  text.textContent = '正在分析时间线...';
+  try {
+    let resp = await fetch('/api/llm-review', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        plan: state.plan, issues: [],
+        clips_meta: state.scenes.filter(s => s.selected !== false).map(s => ({
+          clip_id: 'clip_' + s.index, duration_sec: s.duration_sec,
+          intensity: s.intensity, audio_mode: s.audio_mode, tags: s.tags || []
+        }))
+      })
+    });
+    if (!resp.ok) { let err = await resp.json(); throw new Error(err.detail || '审查失败'); }
+    let data = await resp.json();
+    meta.textContent = '🤖 ' + data.model + ' 审查结果：';
+    text.textContent = data.review;
+  } catch(e) { text.textContent = '❌ ' + e.message; }
+  btn.textContent = '🤖 LLM 审查时间线';
+  btn.disabled = false;
+}
+
+async function visionReview() {
+  if (!state.renderPath) { alert('请先渲染视频'); return; }
+  let btn = document.getElementById('vlmReviewBtn');
+  let box = document.getElementById('vlmReviewBox');
+  let meta = document.getElementById('vlmReviewMeta');
+  let text = document.getElementById('vlmReviewText');
+  btn.textContent = '⏳ 审查中...';
+  btn.disabled = true;
+  box.classList.add('active');
+  meta.textContent = '';
+  text.textContent = '正在提取关键帧并分析...';
+  try {
+    let resp = await fetch('/api/vision-review', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ render_path: state.renderPath, plan: state.plan })
+    });
+    if (!resp.ok) { let err = await resp.json(); throw new Error(err.detail || '审查失败'); }
+    let data = await resp.json();
+    meta.textContent = '👁️ ' + data.model + ' · ' + data.frames + ' 帧审查：';
+    text.textContent = data.review;
+  } catch(e) { text.textContent = '❌ ' + e.message; }
+  btn.textContent = '👁️ 视觉模型审查成片';
+  btn.disabled = false;
+}
+
+// Show LLM review button after plan
+let _origGeneratePlan = generatePlan;
+generatePlan = async function() {
+  await _origGeneratePlan();
+  if (state.plan) document.getElementById('llmReviewBtn').style.display = 'block';
+};
+
+// Show VLM review button after render
+let _origRenderVideo = renderVideo;
+renderVideo = async function() {
+  if (!state.plan) return;
+  let btn = document.getElementById('renderBtn');
+  let status = document.getElementById('renderStatus');
+  btn.disabled = true; btn.textContent = '⏳ 渲染中...';
+  status.className = 'render-status active rendering';
+  status.textContent = '正在渲染，可能需要几分钟...';
+  try {
+    let resp = await fetch('/api/render', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ plan: state.plan })
+    });
+    if (!resp.ok) { let err = await resp.json(); throw new Error(err.detail || '渲染失败'); }
+    let data = await resp.json();
+    state.renderPath = data.output;
+    state.renderUrl = data.download_url;
+    status.className = 'render-status active done';
+    status.innerHTML = '✅ 渲染完成！<br><a href="' + data.download_url + '" download style="color:#2ecc71">📥 下载视频</a>';
+    btn.textContent = '🔄 重新渲染'; btn.disabled = false;
+    document.getElementById('vlmReviewBtn').style.display = 'block';
+  } catch(e) {
+    status.className = 'render-status active err';
+    status.textContent = '❌ ' + e.message;
+    btn.textContent = '🚀 重试渲染'; btn.disabled = false;
+  }
+};
+
+// ═══════════════════════════════════════════════════
+//  Presets & Smart Select
+// ═══════════════════════════════════════════════════
+
+let presets = {};
+let currentPreset = 'smart';
+
+async function loadPresets() {
+  try {
+    let r = await fetch('/api/presets');
+    let data = await r.json();
+    presets = data.presets;
+    let sel = document.getElementById('stylePreset');
+    sel.innerHTML = Object.entries(presets).map(([k, v]) =>
+      `<option value="${k}">${v.name}</option>`
+    ).join('');
+    currentPreset = 'smart';
+    sel.value = 'smart';
+    updateStyleDesc();
+  } catch(e) { console.error('presets:', e); }
+}
+
+function onStyleChange() {
+  currentPreset = document.getElementById('stylePreset').value;
+  updateStyleDesc();
+}
+
+function updateStyleDesc() {
+  let p = presets[currentPreset];
+  document.getElementById('styleDesc').textContent = p ? p.desc : '';
+}
+
+function getPresetParams() {
+  let p = presets[currentPreset] || {};
+  return {
+    strategy: p.strategy || 'fit',
+    intensity_match_strength: p.intensity_match_strength || 0.6,
+    scale_mode: p.scale_mode || 'letterbox',
+    preset: currentPreset,
+  };
+}
+
+// Override generatePlan to use preset params
+let _genPlan = generatePlan;
+generatePlan = async function() {
+  if (!state.sessionId || !state.bgmId) return;
+  let btn = document.getElementById('planBtn');
+  btn.textContent = '⏳ 规划中...';
+  btn.disabled = true;
+
+  let pp = getPresetParams();
+  let scenesData = state.scenes.map(s => ({
+    start_sec: s.start_sec, duration_sec: s.duration_sec,
+    selected: s.selected !== false,
+    trim_start: s.trim_start || 0, trim_end: s.trim_end || s.duration_sec,
+    tags: s.tags || [], intensity: s.intensity || 0.5,
+    audio_mode: s.audio_mode || '融入BGM',
+    description: s.description || '', protect_end: !!s.protect_end, index: s.index,
+  }));
+  try {
+    await fetch(`/api/export/${state.sessionId}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({scenes: scenesData})
+    });
+  } catch(e) {}
+
+  try {
+    let resp = await fetch('/api/plan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        session_id: state.sessionId, bgm_id: state.bgmId,
+        strategy: pp.strategy, seed: Math.floor(Math.random() * 10000),
+        auto_offset: true, scale_mode: pp.scale_mode,
+      })
+    });
+    let data = await resp.json();
+    state.plan = data.plan;
+    state.planReady = data.ready;
+    renderTimeline(data);
+    renderIssues(data);
+    btn.textContent = '🎯 重新规划';
+    btn.disabled = false;
+    document.getElementById('renderBtn').style.display = 'block';
+    if (state.plan) document.getElementById('llmReviewBtn').style.display = 'block';
+  } catch(e) {
+    btn.textContent = '❌ 规划失败';
+    btn.disabled = false;
+  }
+};
+
+async function smartSelect() {
+  if (!state.sessionId) return;
+  let btn = document.getElementById('smartSelectBtn');
+  btn.textContent = '⏳ 分析中...';
+  btn.disabled = true;
+
+  try {
+    let resp = await fetch('/api/auto-select', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        session_id: state.sessionId,
+        style_hint: presets[currentPreset]?.desc || ''
+      })
+    });
+    if (!resp.ok) { let err = await resp.json(); throw new Error(err.detail); }
+    let data = await resp.json();
+
+    // Update local scene state from server response
+    state.scenes = data.scenes;
+
+    // Apply recommended preset if different
+    if (data.recommended_preset && data.recommended_preset !== currentPreset) {
+      currentPreset = data.recommended_preset;
+      document.getElementById('stylePreset').value = currentPreset;
+      updateStyleDesc();
+    }
+
+    renderScenes();
+    updatePlanBtn();
+    btn.textContent = `🤖 已选 ${data.selected_count}/${data.total_scenes} 片段`;
+    document.getElementById('status').textContent =
+      `✅ ${data.reasoning} · ${data.selected_count}片段`;
+    document.getElementById('status').className = 'status ok';
+  } catch(e) {
+    btn.textContent = '❌ ' + e.message.slice(0, 30);
+  }
+  btn.disabled = false;
+}
+
+// Show style selector + smart button when video loaded
+let _handleVideo = handleVideo;
+handleVideo = async function(file) {
+  await _handleVideo(file);
+  if (state.sessionId) {
+    document.getElementById('styleSection').style.display = 'block';
+    document.getElementById('smartSelectBtn').style.display = 'block';
+  }
+};
+
+loadPresets();
+loadSettings();
 </script>
 </body>
 </html>

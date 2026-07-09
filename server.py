@@ -652,5 +652,461 @@ async def health():
     }
 
 
+# ═══════════════════════════════════════════════════════
+#  LLM / VLM integration
+# ═══════════════════════════════════════════════════════
+
+import httpx
+
+LLM_CONFIG_PATH = Path.home() / ".conv-edit" / "llm_config.json"
+LLM_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+DEFAULT_LLM_CONFIG = {
+    "api_base": "http://localhost:11434/v1",
+    "api_key": "",
+    "llm_model": "qwen3.6:27b",
+    "vision_model": "minicpm-v:8b",
+    "enabled": False,
+    "max_tokens": 2048,
+}
+
+
+def _load_llm_config() -> dict:
+    if LLM_CONFIG_PATH.exists():
+        try:
+            return json.loads(LLM_CONFIG_PATH.read_text())
+        except Exception:
+            pass
+    return dict(DEFAULT_LLM_CONFIG)
+
+
+def _save_llm_config(config: dict) -> None:
+    LLM_CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+
+
+async def _llm_chat(config: dict, messages: list[dict], model: str = None) -> str:
+    """Send a chat request to OpenAI-compatible API."""
+    m = model or config.get("llm_model", DEFAULT_LLM_CONFIG["llm_model"])
+    async with httpx.AsyncClient(timeout=120) as client:
+        headers = {"Content-Type": "application/json"}
+        if config.get("api_key"):
+            headers["Authorization"] = f"Bearer {config['api_key']}"
+        resp = await client.post(
+            f"{config['api_base'].rstrip('/')}/chat/completions",
+            headers=headers,
+            json={
+                "model": m,
+                "messages": messages,
+                "max_tokens": config.get("max_tokens", 2048),
+                "temperature": 0.3,
+            },
+        )
+        if resp.status_code != 200:
+            raise HTTPException(502, f"LLM API error: {resp.text[:300]}")
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+
+async def _vlm_chat(config: dict, messages: list[dict]) -> str:
+    """Send a vision chat request."""
+    return await _llm_chat(config, messages, model=config.get("vision_model"))
+
+
+@app.get("/api/llm-config")
+async def get_llm_config():
+    return _load_llm_config()
+
+
+@app.post("/api/llm-config")
+async def set_llm_config(data: dict):
+    config = _load_llm_config()
+    for k in ("api_base", "api_key", "llm_model", "vision_model", "enabled", "max_tokens"):
+        if k in data:
+            config[k] = data[k]
+    _save_llm_config(config)
+    return {"status": "saved", "config": config}
+
+
+@app.post("/api/llm-review")
+async def llm_review(data: dict):
+    """LLM reviews a timeline plan and suggests improvements."""
+    config = _load_llm_config()
+    if not config.get("enabled"):
+        raise HTTPException(400, "LLM is not enabled. Configure it in settings first.")
+
+    plan = data.get("plan", {})
+    issues = data.get("issues", [])
+    clips_meta = data.get("clips_meta", [])
+
+    # Build a structured prompt
+    prompt = _build_review_prompt(plan, issues, clips_meta)
+
+    try:
+        result = await _llm_chat(config, [
+            {"role": "system", "content": "你是视频剪辑质量审查专家。分析时间线计划，找出问题并给出具体可操作的调整建议。用中文回复，每条建议一行。"},
+            {"role": "user", "content": prompt},
+        ])
+        return {"review": result, "model": config["llm_model"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"LLM review failed: {e}")
+
+
+@app.post("/api/vision-review")
+async def vision_review(data: dict):
+    """VLM reviews rendered video frames for visual issues."""
+    config = _load_llm_config()
+    if not config.get("enabled"):
+        raise HTTPException(400, "LLM is not enabled.")
+
+    render_path = data.get("render_path", "")
+    plan = data.get("plan", {})
+
+    if not Path(render_path).exists():
+        raise HTTPException(404, "Render file not found")
+
+    # Extract key frames from transitions and midpoints
+    frames = _extract_review_frames(render_path, plan)
+    if not frames:
+        raise HTTPException(400, "Could not extract frames")
+
+    # Build vision prompt with frames
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": _build_vision_prompt(plan)},
+        ]
+    }]
+    for fp in frames:
+        b64 = base64.b64encode(Path(fp).read_bytes()).decode()
+        messages[0]["content"].append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+        })
+
+    try:
+        result = await _vlm_chat(config, messages)
+        return {"review": result, "model": config["vision_model"], "frames": len(frames)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Vision review failed: {e}")
+
+
+def _build_review_prompt(plan: dict, issues: list[dict], clips_meta: list[dict]) -> str:
+    """Build LLM prompt for timeline review."""
+    segs = plan.get("segments", [])
+    total = plan.get("total_duration_sec", 0)
+    bgm_offset = plan.get("bgm_start_offset_sec", 0)
+
+    lines = [f"## 时间线概览",
+             f"- 总时长: {total:.1f}s",
+             f"- BGM偏移: {bgm_offset:.1f}s",
+             f"- 片段数: {len(segs)}",
+             f"- 问题: {len(issues)} 个",
+             f""]
+
+    if issues:
+        lines.append("## 校验发现的问题")
+        for i in issues:
+            lines.append(f"- [{i.get('severity','?')}] {i.get('msg','')}")
+        lines.append("")
+
+    lines.append("## 片段时间线")
+    lines.append("| # | 入点 | 出点 | 时长 | 强度 | 模式 | 标签 | 变速 |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for i, s in enumerate(segs):
+        spd = f"{s.get('playback_speed',1.0):.2f}x" if s.get('playback_speed', 1.0) != 1.0 else "-"
+        lines.append(f"| {i+1} | {s['timeline_start']:.1f}s | {s['timeline_end']:.1f}s | "
+                     f"{s['timeline_end']-s['timeline_start']:.1f}s | "
+                     f"{s.get('intensity','?')} | {s.get('audio_mode','?')} | "
+                     f"{','.join(s.get('tags',[]))} | {spd} |")
+
+    if clips_meta:
+        lines.append("\n## 原始素材")
+        for c in clips_meta[:10]:
+            lines.append(f"- {c.get('clip_id','?')}: {c.get('duration_sec',0):.1f}s "
+                         f"强度={c.get('intensity',0)} 模式={c.get('audio_mode','?')} "
+                         f"标签={c.get('tags',[])}")
+
+    lines.append("\n## 审查要求")
+    lines.append("请检查以下方面：")
+    lines.append("1. 是否有过长/过短的片段？")
+    lines.append("2. 强度匹配是否合理（高能片段在高能音乐段、平淡在平淡段）？")
+    lines.append("3. 间隙或重叠是否影响观感？")
+    lines.append("4. 变速片段是否会导致画面异常？")
+    lines.append("5. 给出 3 条以内的具体调整建议（改哪个参数、为什么）。")
+
+    return "\n".join(lines)
+
+
+def _build_vision_prompt(plan: dict) -> str:
+    """Build VLM prompt for visual review."""
+    segs = plan.get("segments", [])
+    return ("你是视频质量审查专家。以下是渲染视频的关键帧截图。请检查："
+            "1) 是否有黑场或花屏？2) 画幅是否一致？3) 相邻镜头过渡是否流畅？"
+            "4) 画面内容与标注的片段类型（高能/过渡）是否匹配？"
+            f"共 {len(segs)} 个片段。用中文回复，每条发现一行。")
+
+
+def _extract_review_frames(render_path: str, plan: dict, max_frames: int = 6) -> list[str]:
+    """Extract key frames from a rendered video at transition points."""
+    segs = plan.get("segments", [])
+    times = []
+    # Capture at segment starts (transitions) and midpoints
+    for i, s in enumerate(segs[:max_frames]):
+        t = s.get("timeline_start", 0)
+        times.append(t + 0.1)  # just after transition
+        mid = (s["timeline_start"] + s["timeline_end"]) / 2
+        if abs(mid - t) > 1.0:
+            times.append(mid)
+
+    frames = []
+    for ti in set(round(t, 2) for t in times[:max_frames]):
+        frame_path = RENDER_DIR / f"review_frame_{hashlib.md5(str(ti).encode()).hexdigest()[:8]}.jpg"
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", str(ti), "-i", render_path,
+             "-vframes", "1", "-q:v", "5", str(frame_path)],
+            capture_output=True, timeout=30
+        )
+        if frame_path.exists():
+            frames.append(str(frame_path))
+
+    return frames
+
+
+# ═══════════════════════════════════════════════════════
+#  Editing presets
+# ═══════════════════════════════════════════════════════
+
+EDITING_PRESETS = {
+    "gaming": {
+        "name": "🎮 游戏集锦",
+        "desc": "快节奏击杀/精彩操作合集",
+        "strategy": "fit",
+        "intensity_match_strength": 0.9,
+        "scale_mode": "crop",
+        "prefer_short": True,
+        "audio_bias": "纯BGM",
+        "transition": "hard",
+    },
+    "film": {
+        "name": "🎬 电影对白",
+        "desc": "保护人声，长镜头为主",
+        "strategy": "fit",
+        "intensity_match_strength": 0.3,
+        "scale_mode": "letterbox",
+        "prefer_short": False,
+        "audio_bias": "突出人声",
+        "transition": "fade",
+    },
+    "vlog": {
+        "name": "🏔️ 旅行Vlog",
+        "desc": "中等节奏，穿插安静段",
+        "strategy": "fit",
+        "intensity_match_strength": 0.5,
+        "scale_mode": "letterbox",
+        "prefer_short": False,
+        "audio_bias": "融入BGM",
+        "transition": "fade",
+    },
+    "mv": {
+        "name": "🎵 MV踩点混剪",
+        "desc": "极短切，强制节拍对齐",
+        "strategy": "loop",
+        "intensity_match_strength": 0.8,
+        "scale_mode": "crop",
+        "prefer_short": True,
+        "audio_bias": "纯BGM",
+        "transition": "hard",
+    },
+    "narrative": {
+        "name": "📖 叙事短片",
+        "desc": "按顺序排列，保护结尾",
+        "strategy": "fit",
+        "intensity_match_strength": 0.2,
+        "scale_mode": "letterbox",
+        "prefer_short": False,
+        "audio_bias": "融入BGM",
+        "transition": "fade",
+    },
+    "smart": {
+        "name": "🤖 智能推荐",
+        "desc": "LLM分析素材后自动选择风格",
+        "strategy": "fit",
+        "intensity_match_strength": 0.6,
+        "scale_mode": "letterbox",
+        "prefer_short": None,
+        "audio_bias": None,
+        "transition": "auto",
+    },
+}
+
+
+@app.get("/api/presets")
+async def get_presets():
+    return {"presets": EDITING_PRESETS}
+
+
+@app.post("/api/auto-select")
+async def auto_select(data: dict):
+    """LLM/VLM auto-selects clips + recommends editing style."""
+    config = _load_llm_config()
+    if not config.get("enabled"):
+        raise HTTPException(400, "LLM not enabled")
+
+    session_id = data.get("session_id")
+    style_hint = data.get("style_hint", "")  # e.g. "gaming", "vlog", or free text
+    if session_id not in SESSIONS:
+        raise HTTPException(404, "Session not found")
+
+    session = SESSIONS[session_id]
+    scenes = session["scenes"]
+    if not scenes:
+        raise HTTPException(400, "No scenes to review")
+
+    # Build prompt with scene metadata + thumbnails (up to 20 scenes)
+    review_scenes = scenes[:20]
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": _build_autoselect_prompt(review_scenes, style_hint)},
+        ]
+    }]
+
+    # Attach up to 8 thumbnails
+    for s in review_scenes[:8]:
+        thumb = s.get("thumbnail_b64", "")
+        if thumb and thumb.startswith("data:image"):
+            messages[0]["content"].append({
+                "type": "image_url",
+                "image_url": {"url": thumb}
+            })
+
+    try:
+        result = await _llm_chat(config, messages, model=config.get("vision_model", config["llm_model"]))
+        # Parse LLM response for selections and recommendations
+        parsed = _parse_autoselect_result(result, review_scenes)
+
+        # Apply selections to session
+        for s in session["scenes"]:
+            s["selected"] = s["index"] in parsed["selected_indices"]
+            if s["index"] in parsed["intensity_overrides"]:
+                s["intensity"] = parsed["intensity_overrides"][s["index"]]
+                s["intensity_auto"] = False
+            if s["index"] in parsed["mode_overrides"]:
+                s["audio_mode"] = parsed["mode_overrides"][s["index"]]
+                s["audio_mode_auto"] = False
+
+        return {
+            "recommended_preset": parsed.get("preset", "smart"),
+            "preset_name": EDITING_PRESETS.get(parsed.get("preset", "smart"), {}).get("name", "智能"),
+            "selected_count": len(parsed["selected_indices"]),
+            "total_scenes": len(scenes),
+            "intensity_overrides": len(parsed.get("intensity_overrides", {})),
+            "reasoning": parsed.get("reasoning", ""),
+            "scenes": session["scenes"],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Auto-select failed: {e}")
+
+
+def _build_autoselect_prompt(scenes: list[dict], style_hint: str) -> str:
+    """Build prompt for LLM auto-selection."""
+    style_text = f"用户想要的风格: {style_hint}" if style_hint else "请根据素材内容自动判断最合适的剪辑风格"
+
+    lines = [
+        f"{style_text}",
+        f"",
+        f"以下是 {len(scenes)} 个镜头片段的信息：",
+        f"",
+        "| # | 时长 | 自动强度 | 音频模式 | 标签 |",
+        "|---|---|---|---|---|",
+    ]
+    for s in scenes:
+        lines.append(
+            f"| {s['index']} | {s['duration_sec']:.1f}s | "
+            f"{s.get('intensity', 0.5):.1f} | {s.get('audio_mode', '?')} | "
+            f"{','.join(s.get('tags', []))} |"
+        )
+
+    lines += [
+        "",
+        "请完成以下任务，用JSON格式回复（不要markdown代码块，纯JSON）：",
+        "{",
+        '  "preset": "gaming|film|vlog|mv|narrative",',
+        '  "reasoning": "为什么选这个风格（一句话）",',
+        '  "selected_indices": [0, 2, 5, ...],',
+        '  "intensity_overrides": {"3": 0.9, "7": 0.2},',
+        '  "mode_overrides": {"1": "突出人声", "4": "纯BGM"}',
+        "}",
+        "",
+        "选片原则：",
+        "- 游戏类：优先选高强度(>0.7)、短片段(<4s)，跳过纯过渡",
+        "- 电影类：优先选有对话的(突出人声)、中等长度(3-10s)",
+        "- Vlog类：均匀选择，保留高低强度交替",
+        "- MV类：全选，强度统一拉高",
+        "- 叙事类：保留原顺序，不跳片段",
+        "- selected_indices 列出所有应该保留的片段索引",
+        "- intensity_overrides 只写需要修正的（自动检测不准的）",
+        "- mode_overrides 只写需要修正的",
+        "",
+        "直接返回JSON：",
+    ]
+    return "\n".join(lines)
+
+
+def _parse_autoselect_result(result: str, scenes: list[dict]) -> dict:
+    """Parse LLM response into structured data."""
+    import re
+    # Extract JSON from response
+    json_match = re.search(r'\{[\s\S]*\}', result)
+    if not json_match:
+        # Fallback: select all
+        return {
+            "preset": "smart",
+            "reasoning": "无法解析LLM响应，默认全选",
+            "selected_indices": [s["index"] for s in scenes],
+            "intensity_overrides": {},
+            "mode_overrides": {},
+        }
+    try:
+        data = json.loads(json_match.group(0))
+    except json.JSONDecodeError:
+        return {
+            "preset": "smart",
+            "reasoning": "JSON解析失败，默认全选",
+            "selected_indices": [s["index"] for s in scenes],
+            "intensity_overrides": {},
+            "mode_overrides": {},
+        }
+
+    # Convert string keys to int
+    intensity_overrides = {}
+    for k, v in data.get("intensity_overrides", {}).items():
+        try:
+            intensity_overrides[int(k)] = float(v)
+        except (ValueError, TypeError):
+            pass
+
+    mode_overrides = {}
+    for k, v in data.get("mode_overrides", {}).items():
+        try:
+            mode_overrides[int(k)] = str(v)
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        "preset": data.get("preset", "smart"),
+        "reasoning": data.get("reasoning", ""),
+        "selected_indices": [int(i) for i in data.get("selected_indices", []) if str(i).isdigit()],
+        "intensity_overrides": intensity_overrides,
+        "mode_overrides": mode_overrides,
+    }
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8765, log_level="info")
