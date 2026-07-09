@@ -181,32 +181,126 @@ def _suggest_tags(s: Scene) -> list[str]:
 # ═══════════════════════════════════════════════════════
 
 def detect_scenes_ffmpeg(video_path: str, threshold: float = 0.3) -> list[Scene]:
-    """Use ffmpeg's scene detection filter to find cut points."""
-    cmd = [
-        "ffmpeg", "-i", video_path,
-        "-vf", f"select='gt(scene\\\\,{threshold})',showinfo",
-        "-vsync", "vfr",
-        "-f", "null", "-"
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    """Use ffmpeg's scene detection filter to find cut points.
+    Retries with lower thresholds before falling back to intensity-based splitting."""
     
-    timestamps = [0.0]
-    for line in result.stderr.split('\n'):
-        m = re.search(r'pts_time:([\d.]+)', line)
-        if m:
-            t = float(m.group(1))
-            if t > timestamps[-1] + 0.5:
-                timestamps.append(t)
-    
+    def _run_scdet(thresh: float) -> list[float]:
+        cmd = [
+            "ffmpeg", "-i", video_path,
+            "-vf", f"select='gt(scene\\\\,{thresh})',showinfo",
+            "-vsync", "vfr",
+            "-f", "null", "-"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        timestamps = [0.0]
+        for line in result.stderr.split('\n'):
+            m = re.search(r'pts_time:([\d.]+)', line)
+            if m:
+                t = float(m.group(1))
+                if t > timestamps[-1] + 0.5:
+                    timestamps.append(t)
+        return timestamps
+
     duration = get_video_duration(video_path)
-    if timestamps[-1] < duration - 0.5:
-        timestamps.append(duration)
+    
+    # Try progressively lower thresholds
+    for thresh in [threshold, 0.2, 0.15, 0.1]:
+        timestamps = _run_scdet(thresh)
+        if timestamps[-1] < duration - 0.5:
+            timestamps.append(duration)
+        if len(timestamps) >= 3:
+            break
     
     MIN_SCENE = 1.5
+    MAX_SCENE = 8.0
+    
     scenes = []
     for i in range(len(timestamps) - 1):
         start = timestamps[i]
         end = timestamps[i + 1]
+        dur = end - start
+        
+        # Merge very short scenes into neighbors
+        if dur < MIN_SCENE:
+            if scenes:
+                scenes[-1].end_sec = end
+                scenes[-1].duration_sec = scenes[-1].end_sec - scenes[-1].start_sec
+            continue
+        
+        # Split overly long scenes
+        if dur > MAX_SCENE:
+            sub_n = int(dur / MAX_SCENE) + 1
+            sub_dur = dur / sub_n
+            for j in range(sub_n):
+                sub_start = start + j * sub_dur
+                sub_end = min(start + (j + 1) * sub_dur, end)
+                if sub_end - sub_start >= MIN_SCENE:
+                    scenes.append(Scene(
+                        index=len(scenes),
+                        start_sec=sub_start,
+                        end_sec=sub_end,
+                        duration_sec=sub_end - sub_start
+                    ))
+        else:
+            scenes.append(Scene(
+                index=len(scenes),
+                start_sec=start,
+                end_sec=end,
+                duration_sec=dur
+            ))
+    
+    # Fallback: intensity-based splitting using audio energy
+    if len(scenes) < 3:
+        scenes = _intensity_split(video_path, duration)
+    
+    return scenes
+
+
+def _intensity_split(video_path: str, duration: float) -> list[Scene]:
+    """Split video by audio intensity peaks instead of fixed time chunks."""
+    # Sample audio energy across the video
+    cmd = [
+        "ffmpeg", "-i", video_path,
+        "-af", "aresample=1000,asetnsamples=1000,astats=metadata=1:reset=1",
+        "-vn", "-sn",
+        "-f", "null", "-"
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    
+    # Parse RMS levels
+    rms_values = []
+    for line in result.stderr.split('\n'):
+        m = re.search(r'RMS level dB: ([-\d.]+)', line)
+        if m:
+            rms_values.append(float(m.group(1)))
+    
+    if len(rms_values) < 10:
+        # Ultimate fallback: moderate chunking (not 5s, vary by 3-7s)
+        return _adaptive_chunk(duration)
+    
+    # Convert dB to 0-1 intensity, find peaks
+    intensities = [max(0.0, min(1.0, (v + 50) / 40)) for v in rms_values]
+    sample_dur = duration / len(intensities)
+    
+    # Find local minima as split points
+    splits = [0.0]
+    window = max(3, len(intensities) // 20)  # ~5% of video as window
+    
+    for i in range(window, len(intensities) - window):
+        # Local minimum in a window
+        neighborhood = intensities[i-window:i+window+1]
+        if intensities[i] == min(neighborhood) and intensities[i] < 0.4:
+            t = (i + 0.5) * sample_dur
+            if t - splits[-1] >= 2.0:  # Minimum 2s between splits
+                splits.append(t)
+    
+    splits.append(duration)
+    
+    scenes = []
+    MIN_SCENE = 1.5
+    for i in range(len(splits) - 1):
+        start = splits[i]
+        end = splits[i + 1]
         dur = end - start
         if dur >= MIN_SCENE or len(scenes) == 0:
             scenes.append(Scene(
@@ -219,18 +313,33 @@ def detect_scenes_ffmpeg(video_path: str, threshold: float = 0.3) -> list[Scene]
             scenes[-1].end_sec = end
             scenes[-1].duration_sec = scenes[-1].end_sec - scenes[-1].start_sec
     
-    # Fallback: split by equal time chunks
-    if len(scenes) < 3:
-        CHUNK_SEC = 5.0
-        scenes = []
-        t = 0.0
-        idx = 0
-        while t < duration:
-            end = min(t + CHUNK_SEC, duration)
+    return scenes
+
+
+def _adaptive_chunk(duration: float) -> list[Scene]:
+    """Adaptive chunking: shorter chunks for short videos, longer for long ones."""
+    if duration <= 30:
+        chunk = 3.0
+    elif duration <= 120:
+        chunk = 5.0
+    else:
+        chunk = 8.0
+    
+    scenes = []
+    t = 0.0
+    idx = 0
+    while t < duration:
+        end = min(t + chunk, duration)
+        # Vary chunk size slightly to avoid uniform splits
+        if idx > 0 and end < duration:
+            import random
+            end = min(end + random.uniform(-1.5, 1.5), duration)
+        if end - t >= 1.5:
             scenes.append(Scene(index=idx, start_sec=t, end_sec=end, duration_sec=end - t))
             t = end
             idx += 1
-    
+        else:
+            t = end
     return scenes
 
 
@@ -626,9 +735,10 @@ async def preview_scene(session_id: str, scene_index: int):
     
     cmd = [
         "ffmpeg", "-y", "-ss", str(start), "-i", video_path,
-        "-t", str(duration), "-vf", "scale=640:-1",
-        "-c:v", "libx264", "-preset", "ultrafast",
-        "-an", str(preview_path)
+        "-t", str(duration), "-vf", "scale=854:-2",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+        "-c:a", "aac", "-b:a", "64k",
+        str(preview_path)
     ]
     subprocess.run(cmd, capture_output=True, timeout=30)
     
@@ -725,6 +835,78 @@ async def set_llm_config(data: dict):
             config[k] = data[k]
     _save_llm_config(config)
     return {"status": "saved", "config": config}
+
+
+@app.get("/api/models")
+async def list_models():
+    """Fetch available models from the configured Ollama/OpenAI API."""
+    config = _load_llm_config()
+    api_base = config.get("api_base", "").rstrip("/")
+    if not api_base:
+        return {"models": [], "error": "API 地址未配置"}
+    
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Try Ollama /api/tags first
+            if "11434" in api_base or "ollama" in api_base.lower():
+                resp = await client.get(f"{api_base.replace('/v1','')}/api/tags")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    models = [{"name": m["name"], "id": m["name"]} for m in data.get("models", [])]
+                    return {"models": models, "source": "ollama"}
+            
+            # Try OpenAI /v1/models
+            headers = {"Content-Type": "application/json"}
+            if config.get("api_key"):
+                headers["Authorization"] = f"Bearer {config['api_key']}"
+            resp = await client.get(f"{api_base}/models", headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                models = [{"name": m.get("id", m.get("name", "")), "id": m.get("id", "")}
+                         for m in data.get("data", [])]
+                return {"models": models, "source": "openai"}
+            
+            return {"models": [], "error": f"API 返回 {resp.status_code}"}
+    except Exception as e:
+        return {"models": [], "error": str(e)[:100]}
+
+
+@app.post("/api/test-connection")
+async def test_connection(data: dict):
+    """Server-side proxy to test LLM API connection (avoids browser CORS)."""
+    api_base = data.get("api_base", "").rstrip("/")
+    api_key = data.get("api_key", "")
+    model = data.get("model", "")
+    
+    if not api_base:
+        raise HTTPException(400, "API 地址未配置")
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            
+            resp = await client.post(
+                f"{api_base}/chat/completions",
+                headers=headers,
+                json={
+                    "model": model or "gpt-3.5-turbo",
+                    "messages": [{"role": "user", "content": "回复OK"}],
+                    "max_tokens": 5
+                }
+            )
+            if resp.status_code == 200:
+                return {"status": "ok", "model": model}
+            else:
+                detail = resp.text[:200]
+                raise HTTPException(502, f"API 错误 ({resp.status_code}): {detail}")
+    except httpx.ConnectError:
+        raise HTTPException(502, "无法连接到 API 服务器，请检查地址和网络")
+    except httpx.TimeoutException:
+        raise HTTPException(502, "连接超时")
+    except Exception as e:
+        raise HTTPException(502, str(e)[:200])
 
 
 @app.post("/api/llm-review")

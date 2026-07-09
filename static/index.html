@@ -103,10 +103,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .issue-list .iss.err{background:rgba(231,76,60,0.1);color:#e74c3c}
 .issue-list .iss.warn{background:rgba(243,156,18,0.1);color:#f39c12}
 
-.preview-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.92);z-index:100;justify-content:center;align-items:center}
+.preview-modal{display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:#000;z-index:100;justify-content:center;align-items:center}
 .preview-modal.active{display:flex}
-.preview-modal video{max-width:90%;max-height:80%}
-.preview-modal .close{position:absolute;top:20px;right:20px;color:#fff;font-size:32px;cursor:pointer}
+.preview-modal video{width:100%;height:100%;object-fit:contain}
+.preview-modal .close{position:absolute;top:16px;right:20px;color:#fff;font-size:32px;cursor:pointer;z-index:101;background:rgba(0,0,0,.5);width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:50%}
+.preview-modal .close:hover{background:rgba(255,255,255,.2)}
+
+.hover-preview{display:none;position:absolute;top:0;left:0;width:100%;height:100%;z-index:3;background:#000}
+.hover-preview video{width:100%;height:100%;object-fit:cover}
+.scene-card .thumb{position:relative;overflow:hidden}
+.scene-card .thumb:hover .hover-preview{display:block}
+.scene-card .thumb:hover img{opacity:0}
+.scene-card .thumb .time-badge{z-index:4}
 
 .render-status{padding:8px;border-radius:6px;font-size:11px;text-align:center;display:none}
 .render-status.active{display:block}
@@ -202,11 +210,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       <div class="hint">Ollama / vLLM / OpenAI 兼容接口</div>
       <label>API Key <small style="color:#555">(可选)</small></label>
       <input id="apiKey" type="password" onchange="saveSettings()" placeholder="sk-...">
-      <label>文本模型</label>
-      <input id="llmModel" value="qwen3.6:27b" onchange="saveSettings()" placeholder="模型名">
+      <label>文本模型 <button class="btn-sm" style="float:right;font-size:9px;padding:1px 6px" onclick="fetchModels('llm')">🔄 刷新列表</button></label>
+      <select id="llmModel" onchange="saveSettings()" style="width:100%">
+        <option value="">-- 点击刷新 --</option>
+      </select>
       <div class="hint">用于审查时间线计划</div>
-      <label>视觉模型</label>
-      <input id="visionModel" value="minicpm-v:8b" onchange="saveSettings()" placeholder="视觉模型名">
+      <label>视觉模型 <button class="btn-sm" style="float:right;font-size:9px;padding:1px 6px" onclick="fetchModels('vision')">🔄 刷新列表</button></label>
+      <select id="visionModel" onchange="saveSettings()" style="width:100%">
+        <option value="">-- 点击刷新 --</option>
+      </select>
       <div class="hint">用于审查渲染成片画面</div>
       <button class="btn-sm btn-secondary" style="width:100%;margin-top:8px" onclick="testLLM()">🔌 测试连接</button>
       <span id="testResult" style="font-size:10px;margin-left:8px"></span>
@@ -385,6 +397,11 @@ function renderScenes() {
       <div class="check">${s._multi ? '✓' : ''}</div>
       <div class="thumb">
         ${s.thumbnail_b64 ? `<img src="${s.thumbnail_b64}" style="width:100%;height:100%;object-fit:cover">` : ''}
+        <div class="hover-preview" id="hover-${i}"
+             onmouseenter="startHoverPreview(${i})"
+             onmouseleave="stopHoverPreview(${i})">
+          <video muted loop playsinline></video>
+        </div>
         <div class="time-badge">${dur.toFixed(1)}s</div>
       </div>
       <div class="info">
@@ -545,6 +562,8 @@ async function previewScene(i) {
     let blob = await resp.blob();
     let url = URL.createObjectURL(blob);
     document.getElementById('previewVideo').src = url;
+    document.getElementById('previewVideo').style.width = '100%';
+    document.getElementById('previewVideo').style.height = '100%';
     document.getElementById('previewModal').classList.add('active');
   } catch(e) { alert('预览失败'); }
 }
@@ -552,6 +571,30 @@ async function previewScene(i) {
 function closePreview() {
   document.getElementById('previewModal').classList.remove('active');
   document.getElementById('previewVideo').pause();
+  document.getElementById('previewVideo').src = '';
+}
+
+// ── Hover preview on scene cards ──
+const hoverCache = {};
+async function startHoverPreview(i) {
+  if (hoverCache[i]) {
+    let v = document.querySelector(`#hover-${i} video`);
+    if (v) { v.src = hoverCache[i]; v.play().catch(() => {}); }
+    return;
+  }
+  try {
+    let resp = await fetch(`/api/preview/${state.sessionId}/${i}`);
+    let blob = await resp.blob();
+    let url = URL.createObjectURL(blob);
+    hoverCache[i] = url;
+    let v = document.querySelector(`#hover-${i} video`);
+    if (v) { v.src = url; v.play().catch(() => {}); }
+  } catch(e) {}
+}
+
+function stopHoverPreview(i) {
+  let v = document.querySelector(`#hover-${i} video`);
+  if (v) { v.pause(); }
 }
 
 // ═══════════════════════════════════════════════════
@@ -876,9 +919,52 @@ async function loadSettings() {
     document.getElementById('llmEnabled').checked = llmConfig.enabled;
     document.getElementById('apiBase').value = llmConfig.api_base || '';
     document.getElementById('apiKey').value = llmConfig.api_key || '';
-    document.getElementById('llmModel').value = llmConfig.llm_model || '';
-    document.getElementById('visionModel').value = llmConfig.vision_model || '';
+    // For selects, set value if option exists, otherwise add it
+    setSelectVal('llmModel', llmConfig.llm_model);
+    setSelectVal('visionModel', llmConfig.vision_model);
   } catch(e) {}
+  // Auto-fetch models on load
+  setTimeout(() => { fetchModels('llm'); fetchModels('vision'); }, 300);
+}
+
+function setSelectVal(id, val) {
+  if (!val) return;
+  let sel = document.getElementById(id);
+  if (!sel) return;
+  // Check if value already in options
+  for (let o of sel.options) if (o.value === val) { sel.value = val; return; }
+  // Add as new option
+  let opt = document.createElement('option');
+  opt.value = val; opt.textContent = val;
+  sel.appendChild(opt);
+  sel.value = val;
+}
+
+async function fetchModels(type) {
+  let sel = type === 'llm' ? document.getElementById('llmModel') : document.getElementById('visionModel');
+  let orig = sel.value;
+  sel.innerHTML = '<option value="">⏳ 获取中...</option>';
+  try {
+    let r = await fetch('/api/models');
+    let data = await r.json();
+    sel.innerHTML = '<option value="">-- 选择模型 --</option>';
+    if (data.models && data.models.length) {
+      data.models.forEach(m => {
+        let opt = document.createElement('option');
+        opt.value = m.name || m.id || m;
+        opt.textContent = m.name || m.id || m;
+        sel.appendChild(opt);
+      });
+    } else {
+      sel.innerHTML += '<option value="">无可用模型</option>';
+    }
+    // Restore previous selection
+    if (orig) {
+      for (let o of sel.options) if (o.value === orig) { sel.value = orig; break; }
+    }
+  } catch(e) {
+    sel.innerHTML = '<option value="">❌ 获取失败</option>';
+  }
 }
 
 function toggleSettings() {
@@ -905,20 +991,14 @@ async function testLLM() {
   let el = document.getElementById('testResult');
   el.textContent = '⏳ 测试中...';
   try {
+    // Use server-side proxy to avoid browser CORS issues
     let r = await fetch('/api/llm-config');
     let cfg = await r.json();
     if (!cfg.enabled) { el.textContent = '❌ 未启用'; return; }
-    let resp = await fetch(cfg.api_base.replace(/\/+$/, '') + '/chat/completions', {
+    let resp = await fetch('/api/test-connection', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(cfg.api_key ? {'Authorization': 'Bearer ' + cfg.api_key} : {})
-      },
-      body: JSON.stringify({
-        model: cfg.llm_model,
-        messages: [{role:'user',content:'回复OK'}],
-        max_tokens: 5
-      })
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ api_base: cfg.api_base, api_key: cfg.api_key, model: cfg.llm_model })
     });
     if (resp.ok) { el.textContent = '✅ 连接成功'; }
     else { let err = await resp.text(); el.textContent = '❌ ' + err.slice(0, 80); }
