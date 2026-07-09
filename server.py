@@ -211,6 +211,10 @@ def detect_scenes_ffmpeg(video_path: str, threshold: float = 0.3) -> list[Scene]
         if len(timestamps) >= 3:
             break
     
+    # If scdet found nothing useful (0 or 1 cuts), skip to intensity-based
+    if len(timestamps) <= 2:
+        return _intensity_split(video_path, duration)
+    
     MIN_SCENE = 1.5
     MAX_SCENE = 8.0
     
@@ -287,11 +291,11 @@ def _intensity_split(video_path: str, duration: float) -> list[Scene]:
     window = max(3, len(intensities) // 20)  # ~5% of video as window
     
     for i in range(window, len(intensities) - window):
-        # Local minimum in a window
+        # Local minimum in a window, lower threshold for more splits
         neighborhood = intensities[i-window:i+window+1]
-        if intensities[i] == min(neighborhood) and intensities[i] < 0.4:
+        if intensities[i] == min(neighborhood) and intensities[i] < 0.5:
             t = (i + 0.5) * sample_dur
-            if t - splits[-1] >= 2.0:  # Minimum 2s between splits
+            if t - splits[-1] >= 1.5:  # Minimum 1.5s between splits
                 splits.append(t)
     
     splits.append(duration)
