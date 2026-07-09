@@ -655,24 +655,29 @@ async def render_video(data: dict):
     v_inputs = "".join(f"[v{i}]" for i in range(len(segs)))
     filter_parts.append(f"{v_inputs}concat=n={len(segs)}:v=1:a=0[vout]")
     
-    # Concat all audio streams
+    # Concat all audio streams from segments
     a_inputs = "".join(f"[a{i}]" for i in range(len(segs)))
-    filter_parts.append(f"{a_inputs}concat=n={len(segs)}:v=0:a=1[aout]")
+    filter_parts.append(f"{a_inputs}concat=n={len(segs)}:v=0:a=1[asegs]")
+    
+    # Mix BGM with concatenated audio
+    bgm_vol = plan.get("bgm_volume_db", -12.0)
+    bgm_vol_linear = 10 ** (bgm_vol / 20)
+    filter_parts.append(
+        f"[asegs][1:a]amix=inputs=2:duration=first:weights=1 {bgm_vol_linear}[aout]"
+    )
     
     filter_complex = ";".join(filter_parts)
     
     # Build ffmpeg command
     cmd = ["ffmpeg", "-y"]
     for s in segs:
-        cmd += ["-ss", str(s["source_start"]), "-i", s["source_path"]]
+        cmd += ["-i", s["source_path"]]
     
     cmd += [
         "-i", bgm,
-        "-ss", str(offset),
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "[aout]",
-        "-map", "1:a",
         "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
         "-shortest",
@@ -823,7 +828,7 @@ def _save_llm_config(config: dict) -> None:
 async def _llm_chat(config: dict, messages: list[dict], model: str = None) -> str:
     """Send a chat request to OpenAI-compatible API."""
     m = model or config.get("llm_model", DEFAULT_LLM_CONFIG["llm_model"])
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         headers = {"Content-Type": "application/json"}
         if config.get("api_key"):
             headers["Authorization"] = f"Bearer {config['api_key']}"
@@ -1207,42 +1212,97 @@ async def auto_select(data: dict):
             })
 
     try:
-        # Try vision model first, fall back to text model
+        # Try vision model first, fall back to text model, fall back to rule-based
         result = None
         try:
             result = await _llm_chat(config, messages, model=config.get("vision_model", config["llm_model"]))
         except Exception:
-            # Fallback: text-only model without images
-            if len(messages[0]["content"]) > 1:
-                messages[0]["content"] = [messages[0]["content"][0]]  # Keep only text
-            result = await _llm_chat(config, messages)
+            try:
+                # Fallback: text-only model without images
+                if len(messages[0]["content"]) > 1:
+                    messages[0]["content"] = [messages[0]["content"][0]]
+                result = await _llm_chat(config, messages)
+            except Exception:
+                # Ultimate fallback: rule-based selection
+                parsed = _rule_based_select(review_scenes, style_hint, bgm_info)
+                return _apply_autoselect(session, scenes, parsed)
         
         # Parse LLM response for selections and recommendations
         parsed = _parse_autoselect_result(result, review_scenes)
-
-        # Apply selections to session
-        for s in session["scenes"]:
-            s["selected"] = s["index"] in parsed["selected_indices"]
-            if s["index"] in parsed["intensity_overrides"]:
-                s["intensity"] = parsed["intensity_overrides"][s["index"]]
-                s["intensity_auto"] = False
-            if s["index"] in parsed["mode_overrides"]:
-                s["audio_mode"] = parsed["mode_overrides"][s["index"]]
-                s["audio_mode_auto"] = False
-
-        return {
-            "recommended_preset": parsed.get("preset", "smart"),
-            "preset_name": EDITING_PRESETS.get(parsed.get("preset", "smart"), {}).get("name", "智能"),
-            "selected_count": len(parsed["selected_indices"]),
-            "total_scenes": len(scenes),
-            "intensity_overrides": len(parsed.get("intensity_overrides", {})),
-            "reasoning": parsed.get("reasoning", ""),
-            "scenes": session["scenes"],
-        }
+        return _apply_autoselect(session, scenes, parsed)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, f"Auto-select failed: {e}")
+
+
+def _apply_autoselect(session: dict, all_scenes: list[dict], parsed: dict) -> dict:
+    """Apply auto-select results to session scenes."""
+    for s in all_scenes:
+        s["selected"] = s["index"] in parsed["selected_indices"]
+        if s["index"] in parsed.get("intensity_overrides", {}):
+            s["intensity"] = parsed["intensity_overrides"][s["index"]]
+            s["intensity_auto"] = False
+        if s["index"] in parsed.get("mode_overrides", {}):
+            s["audio_mode"] = parsed["mode_overrides"][s["index"]]
+            s["audio_mode_auto"] = False
+    
+    return {
+        "recommended_preset": parsed.get("preset", "smart"),
+        "preset_name": EDITING_PRESETS.get(parsed.get("preset", "smart"), {}).get("name", "智能"),
+        "selected_count": len(parsed["selected_indices"]),
+        "total_scenes": len(all_scenes),
+        "intensity_overrides": len(parsed.get("intensity_overrides", {})),
+        "reasoning": parsed.get("reasoning", ""),
+        "scenes": all_scenes,
+    }
+
+
+def _rule_based_select(scenes: list[dict], style_hint: str, bgm_info: dict = None) -> dict:
+    """Rule-based clip selection when LLM is unavailable."""
+    indices = []
+    intensity_ov = {}
+    mode_ov = {}
+    
+    # Determine strategy from style hint
+    hint_lower = (style_hint or "").lower()
+    if any(k in hint_lower for k in ["游戏", "集锦", "gaming", "击杀"]):
+        preset = "gaming"
+        for s in scenes:
+            if s.get("intensity", 0) > 0.6 and s["duration_sec"] <= 5:
+                indices.append(s["index"])
+    elif any(k in hint_lower for k in ["电影", "对白", "film"]):
+        preset = "film"
+        for s in scenes:
+            if s["duration_sec"] >= 2 and s["duration_sec"] <= 12:
+                indices.append(s["index"])
+    elif any(k in hint_lower for k in ["mv", "踩点", "音乐"]):
+        preset = "mv"
+        indices = [s["index"] for s in scenes]  # All clips
+        for s in scenes:
+            intensity_ov[s["index"]] = max(0.7, s.get("intensity", 0.5))
+    else:
+        preset = "smart"
+        # Smart: select by intensity, prefer variety
+        high = [s for s in scenes if s.get("intensity", 0) > 0.6]
+        low = [s for s in scenes if s.get("intensity", 0) <= 0.6]
+        # Alternate high and low for variety
+        for i in range(max(len(high), len(low))):
+            if i < len(high):
+                indices.append(high[i]["index"])
+            if i < len(low):
+                indices.append(low[i]["index"])
+    
+    if not indices:
+        indices = [s["index"] for s in scenes[:10]]  # First 10 as fallback
+    
+    return {
+        "preset": preset,
+        "reasoning": f"规则选片（LLM 未连接）：按风格 '{style_hint or '智能'}' 选中 {len(indices)} 个片段",
+        "selected_indices": indices,
+        "intensity_overrides": intensity_ov,
+        "mode_overrides": mode_ov,
+    }
 
 
 def _build_autoselect_prompt(scenes: list[dict], style_hint: str, bgm_info: dict = None) -> str:
