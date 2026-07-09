@@ -1141,5 +1141,162 @@ def _parse_autoselect_result(result: str, scenes: list[dict]) -> dict:
     }
 
 
+# ═══════════════════════════════════════════════════════
+#  Chat-guided semi-auto workflow
+# ═══════════════════════════════════════════════════════
+
+CHAT_SESSIONS: dict[str, list[dict]] = {}  # session_id → message history
+
+
+def _build_chat_system_prompt(scenes: list[dict], bgm_info: dict = None) -> str:
+    """Build system prompt that guides the LLM to act as a video editing assistant."""
+    scene_count = len(scenes)
+    selected = sum(1 for s in scenes if s.get("selected", True))
+    total_dur = sum(s["duration_sec"] for s in scenes if s.get("selected", True))
+
+    # Summarize scenes
+    intensities = [s.get("intensity", 0.5) for s in scenes]
+    modes = {}
+    for s in scenes:
+        m = s.get("audio_mode", "融入BGM")
+        modes[m] = modes.get(m, 0) + 1
+    tags_all = set()
+    for s in scenes:
+        for t in s.get("tags", []):
+            tags_all.add(t)
+
+    prompt = f"""你是视频剪辑助手。用户上传了一段视频，你的任务是引导用户完成剪辑。
+
+## 当前素材
+- 总镜头: {scene_count} 个
+- 已选: {selected} 个（总时长 {total_dur:.0f}s）
+- 强度范围: {min(intensities):.1f}～{max(intensities):.1f}
+- 音频模式分布: {modes}
+- 标签: {', '.join(tags_all) if tags_all else '无'}"""
+
+    if bgm_info:
+        prompt += f"""
+
+## BGM
+- BPM: {bgm_info['bpm']:.0f}
+- 时长: {bgm_info['duration_sec']:.0f}s
+- 段落: {', '.join(f"{s['label']}({s['start']:.0f}～{s['end']:.0f}s)" for s in bgm_info['segments'])}"""
+
+    prompt += f"""
+
+## 你的职责
+1. 先问用户这是什么类型的视频、想要什么风格
+2. 推荐剪辑风格预设 + 解释为什么
+3. 执行智能选片 [ACTION:auto-select]
+4. 等用户确认或提出修改
+5. 用户满意后执行生成 [ACTION:generate-plan]
+
+## 可用命令（放在回复末尾即可，不要放在代码块里）
+[ACTION:set-preset gaming|film|vlog|mv|narrative]
+[ACTION:auto-select]
+[ACTION:generate-plan]
+[ACTION:render]
+
+## 规则
+- 回复简洁，2-4句话
+- 用中文
+- 不要一次性把所有事做完，等用户回复后再下一步
+- 用户说"行/可以/OK"就是确认"""
+
+    return prompt
+
+
+@app.post("/api/chat")
+async def chat(data: dict):
+    """Chat endpoint for guided semi-auto editing workflow."""
+    config = _load_llm_config()
+    if not config.get("enabled"):
+        raise HTTPException(400, "LLM not enabled")
+
+    session_id = data.get("session_id")
+    user_msg = data.get("message", "").strip()
+    bgm_id = data.get("bgm_id")
+
+    if session_id not in SESSIONS:
+        raise HTTPException(404, "Video session not found")
+
+    session = SESSIONS[session_id]
+    scenes = session["scenes"]
+
+    # Build BGM context
+    bgm_info = None
+    if bgm_id and bgm_id in BGM_SESSIONS:
+        bgm = BGM_SESSIONS[bgm_id]
+        bgm_info = {
+            "bpm": bgm.get("bpm", 120),
+            "duration_sec": bgm.get("duration_sec", 60),
+            "segments": [{"label": s["label"], "start": s["start_sec"],
+                          "end": s["end_sec"], "energy": s.get("energy", 0.5)}
+                         for s in bgm.get("segments", [])],
+        }
+
+    # Initialize or load chat history
+    chat_id = f"chat_{session_id}"
+    if chat_id not in CHAT_SESSIONS or data.get("reset"):
+        CHAT_SESSIONS[chat_id] = [
+            {"role": "system", "content": _build_chat_system_prompt(scenes, bgm_info)},
+            {"role": "assistant", "content": _build_first_message(scenes, bgm_info)},
+        ]
+
+    history = CHAT_SESSIONS[chat_id]
+
+    # Update context in system prompt (scenes may have changed)
+    history[0]["content"] = _build_chat_system_prompt(scenes, bgm_info)
+
+    if user_msg:
+        history.append({"role": "user", "content": user_msg})
+
+    try:
+        result = await _llm_chat(config, history[-20:])  # last 20 messages for context
+        history.append({"role": "assistant", "content": result})
+        CHAT_SESSIONS[chat_id] = history
+
+        # Parse actions from response
+        actions = _parse_chat_actions(result)
+
+        return {
+            "reply": result,
+            "actions": actions,
+            "history_length": len(history),
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Chat failed: {e}")
+
+
+def _build_first_message(scenes: list[dict], bgm_info: dict = None) -> str:
+    """Generate the assistant's first message."""
+    scene_count = len(scenes)
+    selected = sum(1 for s in scenes if s.get("selected", True))
+    total_dur = sum(s["duration_sec"] for s in scenes if s.get("selected", True))
+    bgm_line = f"，BGM {bgm_info['bpm']:.0f}BPM" if bgm_info else ""
+
+    return (f"你好！我看到了你的视频——{scene_count} 个镜头{bgm_line}，"
+            f"当前已选 {selected} 个（{total_dur:.0f}s）。"
+            f"\n\n先告诉我：这是什么内容的视频？你想做成什么风格？比如游戏击杀集锦、旅行Vlog、电影剪辑……")
+
+
+def _parse_chat_actions(reply: str) -> list[dict]:
+    """Extract action commands from LLM reply."""
+    import re
+    actions = []
+    for m in re.finditer(r'\[ACTION:([^\]]+)\]', reply):
+        cmd = m.group(1).strip()
+        if cmd == "auto-select":
+            actions.append({"action": "auto-select"})
+        elif cmd == "generate-plan":
+            actions.append({"action": "generate-plan"})
+        elif cmd == "render":
+            actions.append({"action": "render"})
+        elif cmd.startswith("set-preset "):
+            preset = cmd.split(" ", 1)[1].strip()
+            actions.append({"action": "set-preset", "preset": preset})
+    return actions
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8765, log_level="info")
