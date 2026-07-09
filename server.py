@@ -453,7 +453,7 @@ async def render_video(data: dict):
     
     # Save plan for reference
     plan_path = RENDER_DIR / f"render_{render_id}.json"
-    plan_path.write_text(json.dumps(plan, indent=2))
+    plan_path.write_text(json.dumps(plan, indent=2), encoding='utf-8')
     
     segs = plan.get("segments", [])
     if not segs:
@@ -603,7 +603,7 @@ async def export_clips(session_id: str, data: dict):
     # Save clips to file
     clips_path = OUTPUT_DIR / f"clips_{session_id}.json"
     output = {"source_video": video_path, "clip_count": len(clips), "clips": clips}
-    clips_path.write_text(json.dumps(output, indent=2, ensure_ascii=False))
+    clips_path.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding='utf-8')
     
     return output
 
@@ -639,7 +639,7 @@ async def preview_scene(session_id: str, scene_index: int):
 async def index():
     html_path = STATIC_DIR / "index.html"
     if html_path.exists():
-        return html_path.read_text()
+        return html_path.read_text(encoding='utf-8')
     return "<h1>Static files not found</h1>"
 
 
@@ -674,14 +674,14 @@ DEFAULT_LLM_CONFIG = {
 def _load_llm_config() -> dict:
     if LLM_CONFIG_PATH.exists():
         try:
-            return json.loads(LLM_CONFIG_PATH.read_text())
+            return json.loads(LLM_CONFIG_PATH.read_text(encoding='utf-8'))
         except Exception:
             pass
     return dict(DEFAULT_LLM_CONFIG)
 
 
 def _save_llm_config(config: dict) -> None:
-    LLM_CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+    LLM_CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding='utf-8')
 
 
 async def _llm_chat(config: dict, messages: list[dict], model: str = None) -> str:

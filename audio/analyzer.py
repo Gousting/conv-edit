@@ -66,7 +66,7 @@ class MusicTimeline:
     def to_json(self, path: Optional[Path] = None) -> str:
         text = json.dumps(self.to_dict(), indent=2, ensure_ascii=False)
         if path:
-            path.write_text(text)
+            path.write_text(text, encoding='utf-8')
         return text
 
     def _suggest_intro_offset(self) -> float:
