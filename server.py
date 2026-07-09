@@ -524,6 +524,24 @@ async def plan_timeline(data: dict):
     errors = [i for i in issues if i.severity == "ERROR"]
     warnings = [i for i in issues if i.severity == "WARN"]
     
+    # If gaps are too large and strategy was 'fit', retry with 'loop'
+    gap_errors = [i for i in errors if "Gap" in i.message and "too large" in i.message]
+    if gap_errors and strategy == "fit":
+        try:
+            timeline2 = planner.plan(
+                clips, music_timeline, bgm["bgm_path"],
+                duration_strategy="loop",
+                bgm_start_offset=offset,
+                auto_offset=auto_offset,
+                scale_mode=scale_mode,
+            )
+            plan_dict = timeline2.to_dict()
+            issues = validate(plan_dict)
+            errors = [i for i in issues if i.severity == "ERROR"]
+            warnings = [i for i in issues if i.severity == "WARN"]
+        except Exception:
+            pass
+    
     # Auto-fix if there are warnings but no errors
     if warnings and not errors:
         try:
@@ -1174,17 +1192,27 @@ async def auto_select(data: dict):
         ]
     }]
 
-    # Attach up to 8 thumbnails
+    # Attach up to 8 thumbnails (skip large ones to avoid API errors)
     for s in review_scenes[:8]:
         thumb = s.get("thumbnail_b64", "")
-        if thumb and thumb.startswith("data:image"):
+        # Skip thumbnails > 150KB (too large for some APIs)
+        if thumb and thumb.startswith("data:image") and len(thumb) < 150000:
             messages[0]["content"].append({
                 "type": "image_url",
                 "image_url": {"url": thumb}
             })
 
     try:
-        result = await _llm_chat(config, messages, model=config.get("vision_model", config["llm_model"]))
+        # Try vision model first, fall back to text model
+        result = None
+        try:
+            result = await _llm_chat(config, messages, model=config.get("vision_model", config["llm_model"]))
+        except Exception:
+            # Fallback: text-only model without images
+            if len(messages[0]["content"]) > 1:
+                messages[0]["content"] = [messages[0]["content"][0]]  # Keep only text
+            result = await _llm_chat(config, messages)
+        
         # Parse LLM response for selections and recommendations
         parsed = _parse_autoselect_result(result, review_scenes)
 

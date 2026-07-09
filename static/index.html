@@ -73,6 +73,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .spinner{display:inline-block;width:28px;height:28px;border:3px solid #252535;border-top-color:#6c5ce7;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:8px}
 @keyframes spin{to{transform:rotate(360deg)}}
 
+.progress-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:200;justify-content:center;align-items:center;flex-direction:column;gap:12px}
+.progress-overlay.active{display:flex}
+.progress-overlay .msg{font-size:14px;color:#ccc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+.progress-overlay .bar{width:240px;height:4px;background:#252535;border-radius:2px;overflow:hidden}
+.progress-overlay .bar-fill{height:100%;background:#6c5ce7;border-radius:2px;width:0%;transition:width .3s;animation:progressPulse 1.5s ease-in-out infinite}
+@keyframes progressPulse{0%,100%{opacity:1}50%{opacity:.5}}
+
 .bgm-section{background:#151520;border-radius:8px;padding:12px}
 .bgm-section h3{font-size:13px;color:#aaa;margin-bottom:8px}
 .bgm-upload{border:1px dashed #333;border-radius:8px;padding:16px;text-align:center;cursor:pointer;font-size:11px;color:#777;transition:all .2s}
@@ -239,7 +246,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <!-- BGM Section -->
     <div class="bgm-section">
       <h3>🎵 背景音乐</h3>
-      <div class="bgm-upload" id="bgmDrop" onclick="document.getElementById('bgmInput').click()">
+      <div class="bgm-upload" id="bgmDrop">
         <input type="file" id="bgmInput" accept="audio/*">
         <span id="bgmPrompt">点击上传 BGM (mp3/wav)</span>
       </div>
@@ -312,6 +319,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="preview-modal" id="previewModal">
   <span class="close" onclick="closePreview()">✕</span>
   <video id="previewVideo" controls autoplay></video>
+</div>
+
+<!-- Global Progress Overlay -->
+<div class="progress-overlay" id="progressOverlay">
+  <div class="spinner"></div>
+  <div class="msg" id="progressMsg">处理中...</div>
+  <div class="bar"><div class="bar-fill" id="progressBar" style="width:0%"></div></div>
 </div>
 
 <script>
@@ -700,6 +714,7 @@ async function generatePlan() {
   let btn = document.getElementById('planBtn');
   btn.textContent = '⏳ 规划中...';
   btn.disabled = true;
+  showProgress('🎯 正在生成时间线...');
 
   // Sync scene state to server first
   let scenesData = state.scenes.map(s => ({
@@ -741,11 +756,13 @@ async function generatePlan() {
     renderTimeline(data);
     renderIssues(data);
 
+    hideProgress();
     btn.textContent = '🎯 重新规划';
     btn.disabled = false;
 
     document.getElementById('renderBtn').style.display = 'block';
   } catch(e) {
+    hideProgress();
     btn.textContent = '❌ 规划失败';
     btn.disabled = false;
   }
@@ -892,6 +909,20 @@ function showLoading(show) {
   document.getElementById('loading').style.display = show ? 'block' : 'none';
 }
 
+// ── Global progress overlay ──
+function showProgress(msg) {
+  document.getElementById('progressMsg').textContent = msg;
+  document.getElementById('progressBar').style.width = '0%';
+  document.getElementById('progressOverlay').classList.add('active');
+}
+function updateProgress(pct, msg) {
+  if (msg) document.getElementById('progressMsg').textContent = msg;
+  document.getElementById('progressBar').style.width = Math.min(100, pct) + '%';
+}
+function hideProgress() {
+  document.getElementById('progressOverlay').classList.remove('active');
+}
+
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closePreview();
@@ -1013,6 +1044,7 @@ async function llmReview() {
   let text = document.getElementById('llmReviewText');
   btn.textContent = '⏳ 审查中...';
   btn.disabled = true;
+  showProgress('🤖 LLM 正在审查时间线...');
   box.classList.add('active');
   meta.textContent = '';
   text.textContent = '正在分析时间线...';
@@ -1028,10 +1060,12 @@ async function llmReview() {
         }))
       })
     });
+    updateProgress(70, '📋 解析审查结果...');
     if (!resp.ok) { let err = await resp.json(); throw new Error(err.detail || '审查失败'); }
     let data = await resp.json();
     meta.textContent = '🤖 ' + data.model + ' 审查结果：';
     text.textContent = data.review;
+    hideProgress();
   } catch(e) { text.textContent = '❌ ' + e.message; }
   btn.textContent = '🤖 LLM 审查时间线';
   btn.disabled = false;
@@ -1045,6 +1079,7 @@ async function visionReview() {
   let text = document.getElementById('vlmReviewText');
   btn.textContent = '⏳ 审查中...';
   btn.disabled = true;
+  showProgress('👁️ VLM 正在审查成片画面...');
   box.classList.add('active');
   meta.textContent = '';
   text.textContent = '正在提取关键帧并分析...';
@@ -1054,11 +1089,13 @@ async function visionReview() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ render_path: state.renderPath, plan: state.plan })
     });
+    updateProgress(70, '📋 解析审查结果...');
     if (!resp.ok) { let err = await resp.json(); throw new Error(err.detail || '审查失败'); }
     let data = await resp.json();
     meta.textContent = '👁️ ' + data.model + ' · ' + data.frames + ' 帧审查：';
     text.textContent = data.review;
-  } catch(e) { text.textContent = '❌ ' + e.message; }
+    hideProgress();
+  } catch(e) { hideProgress(); text.textContent = '❌ ' + e.message; }
   btn.textContent = '👁️ 视觉模型审查成片';
   btn.disabled = false;
 }
@@ -1196,6 +1233,7 @@ async function smartSelect() {
   let btn = document.getElementById('smartSelectBtn');
   btn.textContent = '⏳ 分析中...';
   btn.disabled = true;
+  showProgress('🤖 AI 正在分析镜头...');
 
   try {
     let resp = await fetch('/api/auto-select', {
@@ -1207,6 +1245,7 @@ async function smartSelect() {
         style_hint: presets[currentPreset]?.desc || ''
       })
     });
+    updateProgress(60, '📋 解析选择结果...');
     if (!resp.ok) { let err = await resp.json(); throw new Error(err.detail); }
     let data = await resp.json();
 
@@ -1222,11 +1261,13 @@ async function smartSelect() {
 
     renderScenes();
     updatePlanBtn();
+    hideProgress();
     btn.textContent = `🤖 已选 ${data.selected_count}/${data.total_scenes} 片段`;
     document.getElementById('status').textContent =
       `✅ ${data.reasoning} · ${data.selected_count}片段`;
     document.getElementById('status').className = 'status ok';
   } catch(e) {
+    hideProgress();
     btn.textContent = '❌ ' + e.message.slice(0, 30);
   }
   btn.disabled = false;
