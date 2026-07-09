@@ -25,16 +25,47 @@
 
 ## 2. 安装
 
+### 2.1 克隆 + Python 依赖
+
 ```bash
-# 克隆
 git clone https://github.com/Gousting/conv-edit.git
 cd conv-edit
-
-# 安装依赖
 pip install fastapi uvicorn librosa scipy ruptures httpx
+```
 
-# 验证 ffmpeg
+### 2.2 安装 ffmpeg
+
+#### Windows
+
+```powershell
+# 方式一：winget（推荐，自动加 PATH）
+winget install ffmpeg
+
+# 方式二：手动下载
+# 1. 打开 https://www.gyan.dev/ffmpeg/builds/
+# 2. 下载 ffmpeg-release-essentials.zip
+# 3. 解压到 E:\App\ffmpeg\
+# 4. 把 E:\App\ffmpeg\bin 加入系统 PATH
+```
+
+安装后**重新打开终端**，验证：
+
+```powershell
 ffmpeg -version
+```
+
+#### macOS
+
+```bash
+brew install ffmpeg
+```
+
+#### Linux
+
+```bash
+sudo apt install ffmpeg   # Ubuntu/Debian
+# 或
+sudo dnf install ffmpeg   # Fedora
 ```
 
 ---
