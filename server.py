@@ -262,21 +262,22 @@ def detect_scenes_ffmpeg(video_path: str, threshold: float = 0.3) -> list[Scene]
 
 def _intensity_split(video_path: str, duration: float) -> list[Scene]:
     """Split video by audio intensity peaks instead of fixed time chunks."""
-    # Sample audio energy across the video
-    cmd = [
-        "ffmpeg", "-i", video_path,
-        "-af", "aresample=1000,asetnsamples=1000,astats=metadata=1:reset=1",
-        "-vn", "-sn",
-        "-f", "null", "-"
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    
-    # Parse RMS levels
-    rms_values = []
-    for line in result.stderr.split('\n'):
-        m = re.search(r'RMS level dB: ([-\d.]+)', line)
-        if m:
-            rms_values.append(float(m.group(1)))
+    try:
+        cmd = [
+            "ffmpeg", "-i", video_path,
+            "-af", "aresample=1000,asetnsamples=1000,astats=metadata=1:reset=1",
+            "-vn", "-sn",
+            "-f", "null", "-"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        
+        rms_values = []
+        for line in result.stderr.split('\n'):
+            m = re.search(r'RMS level dB: ([-\d.]+)', line)
+            if m:
+                rms_values.append(float(m.group(1)))
+    except Exception:
+        rms_values = []
     
     if len(rms_values) < 10:
         # Ultimate fallback: moderate chunking (not 5s, vary by 3-7s)
