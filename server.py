@@ -25,6 +25,22 @@ from planner import CutPlanner, load_clips_from_json, load_music_timeline
 from planner.validator import validate, auto_fix
 from audio.analyzer import AudioAnalyzer
 
+# ─── Logging ──────────────────────────────────────
+import logging
+LOG_DIR = Path.home() / ".conv-edit"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_DIR / "server.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+log = logging.getLogger("conv-edit")
+log.info("=== conv-edit server starting ===")
+
 app = FastAPI(title="conv-edit")
 SESSIONS: dict[str, dict] = {}
 BGM_SESSIONS: dict[str, dict] = {}
@@ -815,9 +831,12 @@ DEFAULT_LLM_CONFIG = {
 def _load_llm_config() -> dict:
     if LLM_CONFIG_PATH.exists():
         try:
-            return json.loads(LLM_CONFIG_PATH.read_text(encoding='utf-8'))
-        except Exception:
-            pass
+            cfg = json.loads(LLM_CONFIG_PATH.read_text(encoding='utf-8'))
+            log.debug(f"config loaded -> enabled={cfg.get('enabled')} llm={cfg.get('llm_model')} vision={cfg.get('vision_model')} base={cfg.get('api_base')}")
+            return cfg
+        except Exception as e:
+            log.warning(f"config load failed: {e}, using defaults")
+    log.debug("config -> using defaults (not found or corrupt)")
     return dict(DEFAULT_LLM_CONFIG)
 
 
@@ -828,24 +847,41 @@ def _save_llm_config(config: dict) -> None:
 async def _llm_chat(config: dict, messages: list[dict], model: str = None) -> str:
     """Send a chat request to OpenAI-compatible API."""
     m = model or config.get("llm_model", DEFAULT_LLM_CONFIG["llm_model"])
-    async with httpx.AsyncClient(timeout=30) as client:
-        headers = {"Content-Type": "application/json"}
-        if config.get("api_key"):
-            headers["Authorization"] = f"Bearer {config['api_key']}"
-        resp = await client.post(
-            f"{config['api_base'].rstrip('/')}/chat/completions",
-            headers=headers,
-            json={
-                "model": m,
-                "messages": messages,
-                "max_tokens": config.get("max_tokens", 2048),
-                "temperature": 0.3,
-            },
-        )
-        if resp.status_code != 200:
-            raise HTTPException(502, f"LLM API error: {resp.text[:300]}")
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+    api_url = f"{config['api_base'].rstrip('/')}/chat/completions"
+    msg_count = len(messages)
+    img_count = 0
+    if messages and isinstance(messages[-1].get("content"), list):
+        img_count = sum(1 for c in messages[-1]["content"] if c.get("type") == "image_url")
+    
+    log.info(f"LLM request -> model={m} url={api_url} msgs={msg_count} images={img_count} timeout=30s")
+    
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"Content-Type": "application/json"}
+            if config.get("api_key"):
+                headers["Authorization"] = f"Bearer {config['api_key']}"
+            resp = await client.post(
+                api_url,
+                headers=headers,
+                json={
+                    "model": m,
+                    "messages": messages,
+                    "max_tokens": config.get("max_tokens", 2048),
+                    "temperature": 0.3,
+                },
+            )
+            if resp.status_code != 200:
+                log.error(f"LLM API error -> status={resp.status_code} body={resp.text[:300]}")
+                raise HTTPException(502, f"LLM API error: {resp.text[:300]}")
+            data = resp.json()
+            content_text = data["choices"][0]["message"]["content"]
+            log.info(f"LLM response <- model={m} len={len(content_text)} chars")
+            return content_text
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"LLM request failed -> model={m} error={type(e).__name__}: {e}")
+        raise
 
 
 async def _vlm_chat(config: dict, messages: list[dict]) -> str:
@@ -1211,29 +1247,43 @@ async def auto_select(data: dict):
                 "image_url": {"url": thumb}
             })
 
-    try:
-        # Try vision model first, fall back to text model, fall back to rule-based
-        result = None
+    # Try vision model if thumbs available, otherwise skip straight to text
+    result = None
+    last_error = None
+    
+    vis_model = config.get("vision_model", config["llm_model"])
+    txt_model = config.get("llm_model", DEFAULT_LLM_CONFIG["llm_model"])
+    log.info(f"auto-select -> scenes={len(review_scenes)} thumbnails={thumb_count} vision={vis_model} text={txt_model}")
+    
+    if thumb_count > 0:
         try:
-            result = await _llm_chat(config, messages, model=config.get("vision_model", config["llm_model"]))
-        except Exception:
-            try:
-                # Fallback: text-only model without images
-                if len(messages[0]["content"]) > 1:
-                    messages[0]["content"] = [messages[0]["content"][0]]
-                result = await _llm_chat(config, messages)
-            except Exception:
-                # Ultimate fallback: rule-based selection
-                parsed = _rule_based_select(review_scenes, style_hint, bgm_info)
-                return _apply_autoselect(session, scenes, parsed)
-        
-        # Parse LLM response for selections and recommendations
-        parsed = _parse_autoselect_result(result, review_scenes)
-        return _apply_autoselect(session, scenes, parsed)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Auto-select failed: {e}")
+            log.info(f"auto-select -> trying vision model: {vis_model}")
+            result = await _llm_chat(config, messages, model=vis_model)
+            log.info(f"auto-select <- vision model OK: {vis_model}")
+        except Exception as e:
+            last_error = str(e)[:100]
+            log.warning(f"auto-select -> vision model failed ({vis_model}): {last_error}")
+    
+    # Text model fallback (or primary if no thumbs)
+    if result is None:
+        try:
+            log.info(f"auto-select -> trying text model: {txt_model}")
+            if len(messages[0]["content"]) > 1:
+                messages[0]["content"] = [messages[0]["content"][0]]
+            result = await _llm_chat(config, messages)
+            log.info(f"auto-select <- text model OK: {txt_model}")
+        except Exception as e2:
+            last_error = last_error or str(e2)[:100]
+            log.warning(f"auto-select -> text model also failed ({txt_model}): {last_error}")
+            log.info("auto-select -> falling back to rule-based selection")
+            parsed = _rule_based_select(review_scenes, style_hint, bgm_info)
+            parsed["reasoning"] = f"规则选片（模型暂时不可用：{last_error}），按风格选中 {len(parsed['selected_indices'])} 个片段"
+            return _apply_autoselect(session, scenes, parsed)
+
+    log.info(f"auto-select -> parsing LLM response ({len(result)} chars)")
+    parsed = _parse_autoselect_result(result, review_scenes)
+    log.info(f"auto-select -> done: preset={parsed.get('preset')} selected={len(parsed['selected_indices'])}")
+    return _apply_autoselect(session, scenes, parsed)
 
 
 @app.post("/api/auto-select-stream")
@@ -1249,7 +1299,10 @@ async def auto_select_stream(data: dict):
         bgm_id = data.get("bgm_id")
         style_hint = data.get("style_hint", "")
         
+        log.info(f"auto-select-stream -> start session={session_id} bgm={bgm_id}")
+        
         if session_id not in SESSIONS:
+            log.error(f"auto-select-stream -> session not found: {session_id}")
             yield f"data: {json.dumps({'step': 'error', 'msg': 'Session not found'})}\n\n"
             return
         
@@ -1288,7 +1341,9 @@ async def auto_select_stream(data: dict):
         try:
             yield f"data: {json.dumps({'step': 'progress', 'msg': '⏳ 已发送请求，等待视觉模型回复...', 'pct': 25})}\n\n"
             result = await _llm_chat(config, messages, model=model_name)
+            log.info(f"auto-select-stream <- vision model OK: {model_name}")
         except Exception as e1:
+            log.warning(f"auto-select-stream -> vision model failed ({model_name}): {e1}")
             yield f"data: {json.dumps({'step': 'progress', 'msg': f'⚠️ 视觉模型无响应，降级到纯文本模型...', 'pct': 30})}\n\n"
             await asyncio.sleep(0.1)
             try:
@@ -1297,7 +1352,10 @@ async def auto_select_stream(data: dict):
                 txt_model = config.get("llm_model", "unknown")
                 yield f"data: {json.dumps({'step': 'progress', 'msg': f'⏳ 正在请求文本模型 ({txt_model})...', 'pct': 35})}\n\n"
                 result = await _llm_chat(config, messages)
+                log.info(f"auto-select-stream <- text model OK: {txt_model}")
             except Exception as e2:
+                log.warning(f"auto-select-stream -> text model also failed ({txt_model}): {e2}")
+                log.info("auto-select-stream -> falling back to rule-based")
                 yield f"data: {json.dumps({'step': 'progress', 'msg': '⚠️ 文本模型也无响应，使用规则选片...', 'pct': 40})}\n\n"
                 await asyncio.sleep(0.1)
                 parsed = _rule_based_select(review_scenes, style_hint, bgm_info)
@@ -1383,7 +1441,7 @@ def _rule_based_select(scenes: list[dict], style_hint: str, bgm_info: dict = Non
     
     return {
         "preset": preset,
-        "reasoning": f"规则选片（LLM 未连接）：按风格 '{style_hint or '智能'}' 选中 {len(indices)} 个片段",
+        "reasoning": f"规则选片（自动降级）：按风格 '{style_hint or '智能'}' 选中 {len(indices)} 个片段",
         "selected_indices": indices,
         "intensity_overrides": intensity_ov,
         "mode_overrides": mode_ov,
@@ -1615,12 +1673,12 @@ async def chat(data: dict):
         history.append({"role": "user", "content": user_msg})
 
     try:
+        log.info(f"chat -> session={session_id} msg_len={len(user_msg)} history={len(history)}")
         result = await _llm_chat(config, history[-20:])  # last 20 messages for context
+        actions = _parse_chat_actions(result)
+        log.info(f"chat <- reply={len(result)} chars actions={[a['action'] for a in actions]}")
         history.append({"role": "assistant", "content": result})
         CHAT_SESSIONS[chat_id] = history
-
-        # Parse actions from response
-        actions = _parse_chat_actions(result)
 
         return {
             "reply": result,

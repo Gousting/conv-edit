@@ -149,7 +149,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .review-box .review-text{font-size:11px;color:#ccc;white-space:pre-wrap;max-height:200px;overflow-y:auto;line-height:1.5}
 .review-box .review-meta{font-size:9px;color:#666;margin-bottom:4px}
 
-.chat-panel{background:#12121e;border-radius:8px;overflow:hidden;margin-bottom:8px}
+.chat-panel{background:#12121e;border-radius:8px;overflow:hidden;margin-bottom:8px;min-height:48px}
 .chat-panel .chat-header{background:#1a1a2e;padding:8px 12px;font-size:12px;color:#aaa;cursor:pointer;display:flex;justify-content:space-between;align-items:center}
 .chat-panel .chat-header:hover{background:#20203a}
 .chat-panel .chat-body{max-height:300px;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:6px}
@@ -1334,7 +1334,9 @@ handleVideo = async function(file) {
 async function initChat() {
   let panel = document.getElementById('chatPanel');
   panel.style.display = 'block';
-  document.getElementById('chatBody').innerHTML = '<div class="typing-dots">⏳ 正在连接助手...</div>';
+  let body = document.getElementById('chatBody');
+  body.style.display = 'flex';  // 强制展开，防止之前被折叠
+  body.innerHTML = '<div class="typing-dots">⏳ 正在连接助手...</div>';
   document.getElementById('chatStatus').textContent = '连接中...';
 
   try {
