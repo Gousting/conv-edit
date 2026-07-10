@@ -138,6 +138,7 @@ class CutPlanner:
         output_fps: int = 30,
         scale_mode: str = "letterbox",
         max_loops: int = 3,
+        arc: Optional[list[float]] = None,
     ) -> RenderTimeline:
         if auto_offset and bgm_start_offset == 0.0:
             suggested = music_timeline.get("suggested_intro_offset", 0.0)
@@ -174,7 +175,7 @@ class CutPlanner:
         if segments_raw:
             segments_raw[-1]["end_sec"] = min(segments_raw[-1]["end_sec"], total_duration)
 
-        assignments = self._assign_clips_to_segments(clips, segments_raw, intensity_match_strength)
+        assignments = self._assign_clips_to_segments(clips, segments_raw, intensity_match_strength, arc)
         render_segments = self._build_gapless_timeline(
             assignments, segments_raw, beats, downbeats
         )
@@ -319,6 +320,7 @@ class CutPlanner:
 
     def _assign_clips_to_segments(
         self, clips: list[ClipInfo], music_segments: list[dict], strength: float,
+        arc: list[float] | None = None,
     ) -> list[list[ClipInfo]]:
         if not clips:
             return [[] for _ in music_segments]
@@ -327,13 +329,23 @@ class CutPlanner:
         sorted_clips = sorted(clips, key=lambda c: c.intensity)
         assignments: list[list[ClipInfo]] = [[] for _ in range(n_segs)]
 
+        # ─── Build arc density map if provided ───
+        arc_weight = [1.0] * n_segs
+        if arc:
+            # Normalize arc to number of music segments
+            arc_len = len(arc)
+            for si in range(n_segs):
+                arc_idx = min(int(si * arc_len / n_segs), arc_len - 1)
+                arc_weight[si] = max(0.1, arc[arc_idx])  # minimum 0.1 to avoid zero
+
         for clip in sorted_clips:
             scores = []
             for si in range(n_segs):
                 energy = music_segments[si]["energy"]
                 iscore = 1.0 - abs(clip.intensity - energy)
                 bscore = 1.0 / (len(assignments[si]) + 1)
-                score = strength * iscore + (1 - strength) * bscore + self.rng.uniform(0, 0.1)
+                score = (strength * iscore + (1 - strength) * bscore + self.rng.uniform(0, 0.1))
+                score *= arc_weight[si]  # ─── Apply arc density multiplier ───
                 scores.append((score, si))
             scores.sort(reverse=True)
             assignments[scores[0][1]].append(clip)

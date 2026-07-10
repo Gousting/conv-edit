@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from planner import CutPlanner, load_clips_from_json, load_music_timeline
 from planner.validator import validate, auto_fix
 from audio.analyzer import AudioAnalyzer
+from overlay import OverlayDef, build_clip_vf, overlays_from_dict, overlays_to_dict
 
 # ─── Logging ──────────────────────────────────────
 import logging
@@ -564,6 +565,10 @@ async def plan_timeline(data: dict):
     offset = data.get("offset", 0.0)
     auto_offset = data.get("auto_offset", True)
     scale_mode = data.get("scale_mode", "letterbox")
+    preset_name = data.get("preset_name", "")
+    arc = data.get("arc", None)
+    if not arc and preset_name and preset_name in EDITING_PRESETS:
+        arc = EDITING_PRESETS[preset_name].get("arc", None)
     
     if session_id not in SESSIONS:
         raise HTTPException(404, "Video session not found")
@@ -616,6 +621,7 @@ async def plan_timeline(data: dict):
         bgm_start_offset=offset,
         auto_offset=auto_offset,
         scale_mode=scale_mode,
+        arc=arc,
     )
     
     plan_dict = timeline.to_dict()
@@ -690,7 +696,12 @@ async def render_video(data: dict):
     segs = plan.get("segments", [])
     if not segs:
         raise HTTPException(400, "No segments in plan")
-    
+
+    # ─── Parse overlays ───
+    raw_overlays = plan.get("overlays", [])
+    overlays: list[OverlayDef] = overlays_from_dict(raw_overlays) if raw_overlays else []
+    log.info(f"render -> {len(overlays)} overlay(s) loaded")
+
     bgm = plan.get("bgm_path", "")
     offset = plan.get("bgm_start_offset_sec", 0.0)
     fps = plan.get("output_fps", 30)
@@ -764,17 +775,21 @@ async def render_video(data: dict):
             # Vocal reduction: notch out 200-500Hz and 800-1500Hz (voice range),
             # keep bass (footsteps) and highs (gunshots/explosions) intact
             vocal_reduce = plan.get("vocal_reduction", True)
-            vf = f"{scale_filter},fps={fps},format=yuv420p"
+            base_vf = f"{scale_filter},fps={fps},format=yuv420p"
             if vocal_reduce:
                 af = f"bandreject=f=300:w=300:width_type=h,bandreject=f=1200:w=600:width_type=h,volume={src_vol}"
             else:
                 af = f"volume={src_vol}"
             if abs(speed - 1.0) > 0.001:
-                vf = f"setpts={speed}*PTS,{scale_filter},fps={fps},format=yuv420p"
+                base_vf = f"setpts={speed}*PTS,{scale_filter},fps={fps},format=yuv420p"
                 if vocal_reduce:
                     af = f"bandreject=f=300:w=300:width_type=h,bandreject=f=1200:w=600:width_type=h,atempo={1/speed},volume={src_vol}"
                 else:
                     af = f"atempo={1/speed},volume={src_vol}"
+
+            # ─── Apply overlays ───
+            clip_global_start = s.get("timeline_start", 0.0)
+            vf = build_clip_vf(base_vf, overlays, clip_global_start, src_dur)
             
             subprocess.run(["ffmpeg", "-y", "-vsync", "cfr",
                 "-i", src, "-ss", str(src_start), "-t", str(src_dur),
@@ -1299,12 +1314,95 @@ EDITING_PRESETS = {
         "audio_bias": None,
         "transition": "auto",
     },
+    "douyin-comedy": {
+        "name": "😂 抖音欢乐剧场",
+        "desc": "直播切片+字幕特效+叙事弧线，破产兄弟风格",
+        "strategy": "fit",
+        "intensity_match_strength": 0.4,
+        "scale_mode": "crop",
+        "prefer_short": False,
+        "audio_bias": "融入BGM",
+        "transition": "hard",
+        "arc": [0.15, 0.1, 0.2, 0.3, 0.5, 0.3, 0.15, 0.15],
+        "vocal_reduction": False,
+        "beat_sync": False,
+        "audio_ducking": False,
+        "keep_ui": True,
+        "default_overlays": [
+            {
+                "id": "title_bar",
+                "type": "text_bar",
+                "content": "",
+                "x": "(w-text_w)/2",
+                "y": "10",
+                "font_size": 22,
+                "font_color": "yellow",
+                "font_border": 2,
+                "font_border_color": "black",
+                "box": True,
+                "box_color": "black@0.55",
+                "box_border": 6,
+                "start": 0,
+                "end": 9999
+            },
+            {
+                "id": "subtitle",
+                "type": "subtitle",
+                "content": "",
+                "x": "(w-text_w)/2",
+                "y": "h-th-50",
+                "font_size": 26,
+                "font_color": "yellow",
+                "font_border": 2,
+                "font_border_color": "black",
+                "box": True,
+                "box_color": "black@0.5",
+                "box_border": 5,
+                "start": 0,
+                "end": 9999
+            }
+        ]
+    },
 }
 
 
 @app.get("/api/presets")
 async def get_presets():
     return {"presets": EDITING_PRESETS}
+
+
+@app.post("/api/overlays")
+async def save_overlays(data: dict):
+    """Save overlay configuration for a session.
+    
+    Body: {"session_id": "xxx", "overlays": [{...}, ...]}
+    The overlays are stored in the session and applied during render.
+    """
+    session_id = data.get("session_id")
+    if not session_id or session_id not in SESSIONS:
+        raise HTTPException(400, "Invalid session_id")
+    
+    raw_overlays = data.get("overlays", [])
+    # Validate by parsing
+    try:
+        parsed = overlays_from_dict(raw_overlays)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid overlay data: {e}")
+    
+    SESSIONS[session_id]["overlays"] = raw_overlays
+    log.info(f"overlays -> session={session_id} count={len(parsed)}")
+    
+    return {"status": "ok", "count": len(parsed)}
+
+
+@app.get("/api/overlays/{session_id}")
+async def get_overlays(session_id: str):
+    """Get overlay configuration for a session."""
+    if session_id not in SESSIONS:
+        raise HTTPException(400, "Invalid session_id")
+    
+    overlays = SESSIONS[session_id].get("overlays", [])
+    return {"overlays": overlays}
 
 
 @app.post("/api/auto-select")

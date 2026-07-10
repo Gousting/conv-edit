@@ -1,0 +1,136 @@
+# douyin-comedy.yaml — 抖音欢乐剧场风格预设
+# 游戏剪辑专用：直播切片 + 字幕特效 + 叙事弧线
+# 参考视频：破产兄弟拯救水友 (三角洲行动)
+
+name: douyin-comedy
+label: 😂 抖音欢乐剧场
+description: 直播切片+字幕特效+叙事弧线，破产兄弟风格
+
+# ─── 场景检测 ───
+scene_detection:
+  threshold: 0.25        # 略低于游戏预设，保留更多过渡镜头
+  retry_thresholds: [0.35, 0.30]
+  min_gap: 0.5
+
+# ─── 高能保护 ───
+high_energy:
+  intensity_threshold: 0.5
+  max_merge_gap: 4.0     # 比游戏预设更宽，允许更多连续片段
+
+# ─── 片段设置 ───
+segments:
+  min_duration: 1.5       # 允许更短的片段（字幕抖包袱需要）
+  max_duration: 12.0      # 允许更长（保留对话完整性）
+  high_intensity_keep: 0.5
+
+# ─── 叙事弧线 ───
+# 将总时长分为8段，每段的切点密度比例（总和=1.0）
+# 破产兄弟视频弧线：慢→中→慢→快→极快→回落→结尾
+narrative_arc:
+  segments: 8
+  density: [0.15, 0.10, 0.20, 0.08, 0.30, 0.10, 0.04, 0.03]
+  labels:
+    - "开场-角色展示"
+    - "配装-建立目标"
+    - "进图-第一波接敌"
+    - "缓冲-跑图"
+    - "🔥高潮-密集笑点"
+    - "收尾-撤离"
+    - "结算"
+    - "END"
+
+# ─── 渲染参数 ───
+render:
+  beat_sync: false        # 不用节拍同步，保持自然对话节奏
+  audio_ducking: false    # 不用音频避让，保留原始语音
+  vocal_reduction: false  # 保留原声（语音是笑点来源）
+  bgm_volume_db: -14.0    # BGM 音量略低于默认
+  output_fps: 30
+  output_resolution: 1920x1080
+  scale_mode: crop        # 裁剪满屏（抖音竖屏转横屏时）
+  keep_ui: true           # ⚠️ 关键：保留游戏原生UI
+  fade_in: 0.05
+  fade_out: 0.1
+
+# ─── 默认叠加层 ───
+overlays:
+  # 顶部标题条：全片恒定显示
+  - id: title_bar
+    type: text_bar
+    content: ""           # 用户填充，eg "破产兄弟+水友自救ing"
+    x: "(w-text_w)/2"    # 水平居中
+    y: "10"              # 距顶部10px
+    font_size: 22
+    font_color: "yellow"
+    font_border: 2
+    font_border_color: "black"
+    box: true
+    box_color: "black@0.55"
+    box_border: 6
+    start: 0.0
+    end: 9999.0
+
+  # 底部字幕：片段级显示
+  - id: subtitle
+    type: subtitle
+    content: ""
+    x: "(w-text_w)/2"
+    y: "h-th-50"         # 距底部50px
+    font_size: 26
+    font_color: "yellow"
+    font_border: 2
+    font_border_color: "black"
+    box: true
+    box_color: "black@0.5"
+    box_border: 5
+    start: 0.0
+    end: 9999.0
+
+  # 巨型飘字（哈哈哈）
+  - id: popup_ha
+    type: text_popup
+    content: "哈哈哈"
+    x: "(w-text_w)/2"
+    y: "(h-text_h)/2"
+    font_size: 48
+    font_color: "white"
+    font_border: 3
+    font_border_color: "black"
+    start: 0.0
+    end: 0.0            # 仅在指定时间点闪现
+
+  # 受击特效字（啊~）
+  - id: hit_text
+    type: text_popup
+    content: "啊~"
+    x: "(w-text_w)/2"
+    y: "(h-text_h)*0.6"
+    font_size: 36
+    font_color: "red"
+    font_border: 2
+    font_border_color: "white"
+    start: 0.0
+    end: 0.0
+
+# ─── 特效素材（游戏专属） ───
+effects:
+  - name: glass_shatter
+    type: image
+    path: "effects/glass_shatter.png"
+    scale_w: 400
+    scale_h: 300
+    duration: 0.5
+    
+  - name: hit_flash
+    type: image
+    path: "effects/hit_flash.png"
+    scale_w: 200
+    scale_h: 200
+    duration: 0.3
+
+  - name: money_rain
+    type: image
+    path: "effects/money.png"
+    scale_w: 100
+    scale_h: 100
+    duration: 1.0
