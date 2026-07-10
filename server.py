@@ -1238,6 +1238,7 @@ async def auto_select(data: dict):
     }]
 
     # Attach up to 8 thumbnails (skip large ones to avoid API errors)
+    thumb_count = 0
     for s in review_scenes[:8]:
         thumb = s.get("thumbnail_b64", "")
         # Skip thumbnails > 150KB (too large for some APIs)
@@ -1246,6 +1247,7 @@ async def auto_select(data: dict):
                 "type": "image_url",
                 "image_url": {"url": thumb}
             })
+            thumb_count += 1
 
     # Try vision model if thumbs available, otherwise skip straight to text
     result = None
