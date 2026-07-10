@@ -196,6 +196,61 @@ def _suggest_tags(s: Scene) -> list[str]:
 #  FFmpeg helpers
 # ═══════════════════════════════════════════════════════
 
+def _merge_high_energy_fragments(video_path: str, scene_times: list[float], duration: float) -> list[float]:
+    """方案一：如果两个切点间隔 < 2.5s 且该区间音频响度极高（激战），
+    强制删除中间切点，把碎片合并为完整的战斗段落。"""
+    if len(scene_times) <= 2:
+        return scene_times
+    
+    # 提取音频 RMS 强度（采样间隔 ~1s）
+    try:
+        cmd = [
+            "ffmpeg", "-i", video_path,
+            "-af", "aresample=1000,asetnsamples=1000,astats=metadata=1:reset=1",
+            "-vn", "-sn", "-f", "null", "-"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        rms_db = []
+        for line in result.stderr.split('\n'):
+            m = re.search(r'RMS level dB: ([-\\d.]+)', line)
+            if m:
+                rms_db.append(float(m.group(1)))
+    except Exception:
+        return scene_times  # 失败则跳过保护
+    
+    if len(rms_db) < 10:
+        return scene_times
+    
+    # dB → 0-1 强度
+    intensities = [max(0.0, min(1.0, (v + 50) / 40)) for v in rms_db]
+    sample_dur = duration / len(intensities)
+    
+    def _intensity_at(t: float) -> float:
+        idx = min(int(t / sample_dur), len(intensities) - 1)
+        return intensities[idx]
+    
+    MIN_GAP = 2.5       # 小于此间隔的碎片候选合并
+    HIGH_ENERGY = 0.6   # 强度阈值，超过视为激战
+    
+    merged = [scene_times[0]]
+    skipped = 0
+    for i in range(1, len(scene_times) - 1):
+        gap = scene_times[i] - scene_times[i - 1]
+        mid = (scene_times[i - 1] + scene_times[i]) / 2
+        energy = _intensity_at(mid)
+        
+        if gap < MIN_GAP and energy > HIGH_ENERGY:
+            # 激战中的碎切点 → 跳过，合并到前后
+            skipped += 1
+            continue
+        merged.append(scene_times[i])
+    
+    merged.append(scene_times[-1])
+    if skipped:
+        print(f"[高能保护] 合并了 {skipped} 个碎切点，保留高光片段完整")
+    return merged
+
+
 def detect_scenes_ffmpeg(video_path: str, threshold: float = 0.3) -> list[Scene]:
     """Use ffmpeg's scene detection filter to find cut points.
     Retries with lower thresholds before falling back to intensity-based splitting."""
@@ -219,13 +274,17 @@ def detect_scenes_ffmpeg(video_path: str, threshold: float = 0.3) -> list[Scene]
 
     duration = get_video_duration(video_path)
     
-    # Try progressively lower thresholds
-    for thresh in [threshold, 0.2, 0.15, 0.1]:
+    # ─── 方案二：高阈值策略（游戏内容不需要细切） ───
+    # 阈值越高越不敏感，只识别真正的场景切换（如地图切换），忽略枪火/跑动
+    for thresh in [threshold, 0.4, 0.35]:
         timestamps = _run_scdet(thresh)
         if timestamps[-1] < duration - 0.5:
             timestamps.append(duration)
         if len(timestamps) >= 3:
             break
+    
+    # ─── 方案一：高能片段保护合并（防止击杀镜头被切碎） ───
+    timestamps = _merge_high_energy_fragments(video_path, timestamps, duration)
     
     # If scdet found nothing useful (0 or 1 cuts), skip to intensity-based
     if len(timestamps) <= 2:
@@ -623,91 +682,94 @@ async def render_video(data: dict):
     filter_parts = []
     audio_parts = []
     
-    for i, s in enumerate(segs):
-        src = s["source_path"]
-        src_start = s["source_start"]
-        src_dur = s["source_duration"]
-        tl_dur = s["timeline_end"] - s["timeline_start"]
-        speed = s.get("playback_speed", 1.0)
-        audio_mode = s.get("audio_mode", "融入BGM")
-        
-        # Video: trim + scale + setpts
-        scale_filter = ""
-        if scale_mode == "letterbox":
-            scale_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
-        elif scale_mode == "crop":
-            scale_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
-        else:
-            scale_filter = f"scale={width}:{height}"
-        
-        if abs(speed - 1.0) > 0.001:
-            filter_parts.append(
-                f"[{i}:v]trim={src_start}:{src_start+src_dur},setpts={speed}*PTS,"
-                f"{scale_filter},fps={fps},format=yuv420p[v{i}]"
-            )
-        else:
-            filter_parts.append(
-                f"[{i}:v]trim={src_start}:{src_start+src_dur},setpts=PTS,"
-                f"{scale_filter},fps={fps},format=yuv420p[v{i}]"
-            )
-        
-        # Audio: trim + atempo if speed-adjusted
-        src_vol = s.get("source_audio_volume", 1.0)
-        if audio_mode == "纯BGM" or src_vol <= 0:
-            # Mute source audio
-            audio_parts.append(f"[{i}:a]atrim={src_start}:{src_start+src_dur},volume=0[a{i}]")
-        else:
-            vol_str = f"volume={src_vol}"
-            if abs(speed - 1.0) > 0.001:
-                audio_parts.append(
-                    f"[{i}:a]atrim={src_start}:{src_start+src_dur},atempo={1/speed},{vol_str}[a{i}]"
-                )
-            else:
-                audio_parts.append(
-                    f"[{i}:a]atrim={src_start}:{src_start+src_dur},{vol_str}[a{i}]"
-                )
-    
-    # Concat all video streams
-    v_inputs = "".join(f"[v{i}]" for i in range(len(segs)))
-    filter_parts.append(f"{v_inputs}concat=n={len(segs)}:v=1:a=0[vout]")
-    
-    # Concat all audio streams from segments
-    a_inputs = "".join(f"[a{i}]" for i in range(len(segs)))
-    filter_parts.append(f"{a_inputs}concat=n={len(segs)}:v=0:a=1[asegs]")
-    
-    # Mix BGM with concatenated audio
-    bgm_vol = plan.get("bgm_volume_db", -12.0)
-    bgm_vol_linear = 10 ** (bgm_vol / 20)
-    filter_parts.append(
-        f"[asegs][1:a]amix=inputs=2:duration=first:weights=1 {bgm_vol_linear}[aout]"
-    )
-    
-    filter_complex = ";".join(filter_parts)
-    
-    # Build ffmpeg command
-    cmd = ["ffmpeg", "-y"]
+    # Deduplicate source files → map each to a unique input index
+    unique_sources = []
+    source_to_idx = {}
     for s in segs:
-        cmd += ["-i", s["source_path"]]
+        sp = s["source_path"]
+        if sp not in source_to_idx:
+            source_to_idx[sp] = len(unique_sources)
+            unique_sources.append(sp)
     
-    cmd += [
-        "-i", bgm,
-        "-filter_complex", filter_complex,
-        "-map", "[vout]",
-        "-map", "[aout]",
-        "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        "-shortest",
-        str(output_path)
-    ]
+    # Two-phase approach for reliable rendering:
+    # Phase 1: cut individual clips (fast, -c copy where possible)
+    # Phase 2: concat via demuxer + mix BGM
+    
+    # Build scale filter once
+    if scale_mode == "letterbox":
+        scale_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+    elif scale_mode == "crop":
+        scale_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
+    else:
+        scale_filter = f"scale={width}:{height}"
+    
+    import tempfile, shutil
+    tmp_dir = Path(tempfile.mkdtemp(dir=RENDER_DIR, prefix="tmp_"))
+    clip_files = []
+    clip_list = tmp_dir / "concat_list.txt"
+    lines = []
     
     try:
+        for i, s in enumerate(segs):
+            src = s["source_path"]
+            src_start = s["source_start"]
+            src_dur = s["source_duration"]
+            speed = s.get("playback_speed", 1.0)
+            src_vol = s.get("source_audio_volume", 1.0)
+            clip_out = tmp_dir / f"clip_{i:03d}.mp4"
+            
+            # Cut clip with video scaling + audio (preserves sync)
+            # Vocal reduction: notch out 200-500Hz and 800-1500Hz (voice range),
+            # keep bass (footsteps) and highs (gunshots/explosions) intact
+            vocal_reduce = plan.get("vocal_reduction", True)
+            vf = f"{scale_filter},fps={fps},format=yuv420p"
+            if vocal_reduce:
+                af = f"bandreject=f=300:w=300:width_type=h,bandreject=f=1200:w=600:width_type=h,volume={src_vol}"
+            else:
+                af = f"volume={src_vol}"
+            if abs(speed - 1.0) > 0.001:
+                vf = f"setpts={speed}*PTS,{scale_filter},fps={fps},format=yuv420p"
+                if vocal_reduce:
+                    af = f"bandreject=f=300:w=300:width_type=h,bandreject=f=1200:w=600:width_type=h,atempo={1/speed},volume={src_vol}"
+                else:
+                    af = f"atempo={1/speed},volume={src_vol}"
+            
+            subprocess.run(["ffmpeg", "-y", "-vsync", "cfr",
+                "-i", src, "-ss", str(src_start), "-t", str(src_dur),
+                "-vf", vf, "-af", af,
+                "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                str(clip_out)], capture_output=True, timeout=120)
+            
+            clip_files.append(str(clip_out))
+            lines.append(f"file '{clip_out}'\n")
+        
+        # Phase 2: concat all clips, then mix with BGM
+        clip_list.write_text("".join(lines))
+        
+        # Concat demuxer gives us video (0:v) + audio (0:a)
+        # Mix concat audio with BGM via filter_complex
+        audio_filter = f"[0:a][1:a]amix=inputs=2:duration=first:weights=1 {10 ** (plan.get('bgm_volume_db', -12.0) / 20)}[aout]"
+        
+        cmd = ["ffmpeg", "-y",
+            "-fflags", "+genpts",
+            "-f", "concat", "-safe", "0", "-i", str(clip_list),
+            "-i", bgm,
+            "-filter_complex", audio_filter,
+            "-map", "0:v",
+            "-map", "[aout]",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-t", str(plan.get("total_duration_sec", 60)),
+            str(output_path)
+        ]
+        
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             raise HTTPException(500, f"Render failed: {result.stderr[-500:]}")
-    except subprocess.TimeoutExpired:
-        raise HTTPException(500, "Render timed out (10 min)")
-    except Exception as e:
-        raise HTTPException(500, f"Render error: {e}")
+        
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     
     return {
         "render_id": render_id,
