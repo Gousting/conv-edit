@@ -251,6 +251,28 @@ def _merge_high_energy_fragments(video_path: str, scene_times: list[float], dura
     return merged
 
 
+def _detect_bpm(bgm_path: str) -> float:
+    """从 BGM 文件检测 BPM，使用 ffmpeg astats 瞬态分析。"""
+    try:
+        cmd = ["ffmpeg", "-i", bgm_path,
+               "-af", "astats=metadata=1:reset=1",
+               "-f", "null", "-"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        rms_vals = []
+        for line in result.stderr.split('\n'):
+            m = re.search(r'RMS level dB: ([-\\d.]+)', line)
+            if m:
+                rms_vals.append(float(m.group(1)))
+        if len(rms_vals) < 10:
+            return 0
+        # 瞬态峰值密度 → 估算 BPM
+        peaks = sum(1 for v in rms_vals if v > -15)
+        bpm = (peaks / len(rms_vals)) * 60 * 2
+        return max(60, min(180, bpm))
+    except Exception:
+        return 0
+
+
 def detect_scenes_ffmpeg(video_path: str, threshold: float = 0.3) -> list[Scene]:
     """Use ffmpeg's scene detection filter to find cut points.
     Retries with lower thresholds before falling back to intensity-based splitting."""
@@ -695,6 +717,26 @@ async def render_video(data: dict):
     # Phase 1: cut individual clips (fast, -c copy where possible)
     # Phase 2: concat via demuxer + mix BGM
     
+    # ─── Beat-sync: snap clip start times to BGM beats ───
+    if plan.get("beat_sync", True) and bgm:
+        bpm = _detect_bpm(bgm)
+        if bpm > 0:
+            beat_interval = 60.0 / bpm
+            offset = plan.get("bgm_start_offset_sec", 0.0)
+            # Snap each segment's timeline_start to nearest beat
+            cursor = offset
+            for s in segs:
+                # Snap start to beat, but keep source_duration intact
+                snapped_start = round(cursor / beat_interval) * beat_interval
+                dur = s.get("timeline_end", 0) - s.get("timeline_start", 0)
+                s["timeline_start"] = snapped_start
+                s["timeline_end"] = snapped_start + dur
+                cursor = snapped_start + dur
+            # Update total duration
+            last_end = max(s["timeline_end"] for s in segs) if segs else 0
+            plan["total_duration_sec"] = last_end
+            print(f"[节拍同步] BPM={bpm:.0f} 节拍间隔={beat_interval:.2f}s 总长={last_end:.1f}s")
+    
     # Build scale filter once
     if scale_mode == "letterbox":
         scale_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
@@ -747,9 +789,14 @@ async def render_video(data: dict):
         # Phase 2: concat all clips, then mix with BGM
         clip_list.write_text("".join(lines))
         
-        # Concat demuxer gives us video (0:v) + audio (0:a)
-        # Mix concat audio with BGM via filter_complex
-        audio_filter = f"[0:a][1:a]amix=inputs=2:duration=first:weights=1 {10 ** (plan.get('bgm_volume_db', -12.0) / 20)}[aout]"
+        # ─── 音频避让：枪响/爆炸时BGM自动压低（sidechain compression） ───
+        if plan.get("audio_ducking", True):
+            # [1:a]=BGM(主信号) [0:a]=源音频(侧链触发)
+            # 当源音频 > -20dB 时，BGM被压低到 30%，释放时间 150ms
+            audio_filter = f"[1:a][0:a]sidechaincompress=threshold=0.08:ratio=6:attack=5:release=150:level_sc=0.3[aout]"
+        else:
+            bgm_vol = 10 ** (plan.get('bgm_volume_db', -12.0) / 20)
+            audio_filter = f"[0:a][1:a]amix=inputs=2:duration=first:weights=1 {bgm_vol}[aout]"
         
         cmd = ["ffmpeg", "-y",
             "-fflags", "+genpts",
