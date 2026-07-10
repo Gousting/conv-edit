@@ -1,65 +1,75 @@
-# douyin-comedy.yaml — 抖音欢乐剧场风格预设
-# 游戏剪辑专用：直播切片 + 字幕特效 + 叙事弧线
-# 参考视频：破产兄弟拯救水友 (三角洲行动)
+# douyin-comedy.yaml — 三角洲行动欢乐剧场预设
+# 基于破产兄弟风格 + 三角洲行动游戏理解
+# 参考: presets/三角洲行动-游戏理解.md
 
 name: douyin-comedy
-label: 😂 抖音欢乐剧场
-description: 直播切片+字幕特效+叙事弧线，破产兄弟风格
+label: 😂 三角洲欢乐剧场
+description: 保留真实语音+队友吐槽+枪械发光特效+叙事弧线
+game: 三角洲行动
+game_knowledge: presets/三角洲行动-游戏理解.md
 
 # ─── 场景检测 ───
 scene_detection:
-  threshold: 0.25        # 略低于游戏预设，保留更多过渡镜头
+  threshold: 0.22        # 比默认低，保留过渡镜头（搜物资/跑图）
   retry_thresholds: [0.35, 0.30]
   min_gap: 0.5
 
 # ─── 高能保护 ───
 high_energy:
   intensity_threshold: 0.5
-  max_merge_gap: 4.0     # 比游戏预设更宽，允许更多连续片段
+  max_merge_gap: 5.0     # 把接敌+追击合并为一段
 
 # ─── 片段设置 ───
 segments:
-  min_duration: 1.5       # 允许更短的片段（字幕抖包袱需要）
-  max_duration: 12.0      # 允许更长（保留对话完整性）
-  high_intensity_keep: 0.5
+  min_duration: 2.0       # 最短2秒，让观众能看懂
+  max_duration: 10.0      # 最长10秒（配装/跑图阶段可以长一点）
+  high_intensity_keep: 0.4
 
-# ─── 叙事弧线 ───
-# 将总时长分为8段，每段的切点密度比例（总和=1.0）
-# 破产兄弟视频弧线：慢→中→慢→快→极快→回落→结尾
+# ─── 叙事弧线（三角洲行动标准流程） ───
+# 配装→进图→搜刮→接敌→撤离→结算
 narrative_arc:
   segments: 8
-  density: [0.15, 0.10, 0.20, 0.08, 0.30, 0.10, 0.04, 0.03]
+  density: [0.08, 0.10, 0.12, 0.20, 0.25, 0.15, 0.07, 0.03]
   labels:
-    - "开场-角色展示"
-    - "配装-建立目标"
-    - "进图-第一波接敌"
-    - "缓冲-跑图"
-    - "🔥高潮-密集笑点"
-    - "收尾-撤离"
+    - "配装/大厅"
+    - "进图-跑图"
+    - "搜物资"
+    - "第一波接敌"
+    - "🔥高潮-对枪/搞笑死亡"
+    - "撤离/翻盘"
     - "结算"
     - "END"
 
 # ─── 渲染参数 ───
 render:
-  beat_sync: false        # 不用节拍同步，保持自然对话节奏
-  audio_ducking: false    # 不用音频避让，保留原始语音
-  vocal_reduction: false  # 保留原声（语音是笑点来源）
-  bgm_volume_db: -14.0    # BGM 音量略低于默认
+  beat_sync: false        # 不跟节拍，保留语音自然节奏
+  audio_ducking: false    # 不压低BGM，语音优先
+  vocal_reduction: false  # ⚠️ 关键：保留全部原声
+  bgm_volume_db: -18.0    # BGM 更低调，突出语音
   output_fps: 30
   output_resolution: 1920x1080
-  scale_mode: crop        # 裁剪满屏（抖音竖屏转横屏时）
-  keep_ui: true           # ⚠️ 关键：保留游戏原生UI
-  fade_in: 0.05
-  fade_out: 0.1
+  scale_mode: crop
+  keep_ui: true           # ⚠️ 关键：保留血量/弹药/地图
+  fade_in: 0.03
+  fade_out: 0.15
 
-# ─── 默认叠加层 ───
+# ─── 字幕风格 ───
+subtitle_style:
+  font: "yellow"           # 黄字
+  border: "black"          # 黑描边
+  size: 28                 # 底部字幕字号
+  box: true
+  box_color: "black@0.55"
+  position: "h-th-60"      # 距底部60px
+
+# ─── 叠加层 ───
 overlays:
-  # 顶部标题条：全片恒定显示
+  # 标题条：队名+金额目标
   - id: title_bar
     type: text_bar
-    content: ""           # 用户填充，eg "破产兄弟+水友自救ing"
-    x: "(w-text_w)/2"    # 水平居中
-    y: "10"              # 距顶部10px
+    content: ""            # 用户填充，例如 "破产兄弟+自救ing  500W→1500W"
+    x: "(w-text_w)/2"
+    y: "10"
     font_size: 22
     font_color: "yellow"
     font_border: 2
@@ -70,13 +80,13 @@ overlays:
     start: 0.0
     end: 9999.0
 
-  # 底部字幕：片段级显示
+  # 底部字幕（标注队友语音）
   - id: subtitle
     type: subtitle
     content: ""
     x: "(w-text_w)/2"
-    y: "h-th-50"         # 距底部50px
-    font_size: 26
+    y: "h-th-60"
+    font_size: 28
     font_color: "yellow"
     font_border: 2
     font_border_color: "black"
@@ -86,51 +96,88 @@ overlays:
     start: 0.0
     end: 9999.0
 
-  # 巨型飘字（哈哈哈）
-  - id: popup_ha
-    type: text_popup
-    content: "哈哈哈"
-    x: "(w-text_w)/2"
-    y: "(h-text_h)/2"
-    font_size: 48
-    font_color: "white"
-    font_border: 3
-    font_border_color: "black"
-    start: 0.0
-    end: 0.0            # 仅在指定时间点闪现
-
-  # 受击特效字（啊~）
+  # 受击大字
   - id: hit_text
     type: text_popup
     content: "啊~"
     x: "(w-text_w)/2"
-    y: "(h-text_h)*0.6"
-    font_size: 36
-    font_color: "red"
-    font_border: 2
+    y: "(h-text_h)*0.55"
+    font_size: 44
+    font_color: "#FF3333"
+    font_border: 3
     font_border_color: "white"
     start: 0.0
     end: 0.0
 
-# ─── 特效素材（游戏专属） ───
+  # 击杀大字
+  - id: kill_text
+    type: text_popup
+    content: "秒了"
+    x: "(w-text_w)/2"
+    y: "(h-text_h)*0.45"
+    font_size: 60
+    font_color: "#FF4444"
+    font_border: 3
+    font_border_color: "black"
+    start: 0.0
+    end: 0.0
+
+  # 失败大字（死亡/倒地时）
+  - id: death_text
+    type: text_popup
+    content: "白给了"
+    x: "(w-text_w)/2"
+    y: "(h-text_h)*0.5"
+    font_size: 56
+    font_color: "#888888"
+    font_border: 3
+    font_border_color: "black"
+    start: 0.0
+    end: 0.0
+
+# ─── 特效（游戏专属） ───
 effects:
-  - name: glass_shatter
+  # 枪械发光 — 击杀/对枪时刻叠加
+  - name: weapon_glow_warm
     type: image
-    path: "effects/glass_shatter.png"
-    scale_w: 400
-    scale_h: 300
-    duration: 0.5
-    
+    description: "暖色枪口发光光晕，用于击杀瞬间"
+    color: "#FF8800"
+    position: center_bottom
+    scale_w: 300
+    scale_h: 200
+    duration: 0.6
+    fade_out: true
+
+  - name: weapon_glow_cold
+    type: image
+    description: "冷色枪口发光，用于狙击/远程击杀"
+    color: "#4488FF"
+    position: center_bottom
+    scale_w: 300
+    scale_h: 200
+    duration: 0.6
+    fade_out: true
+
+  # 受击/死亡特效
   - name: hit_flash
     type: image
-    path: "effects/hit_flash.png"
-    scale_w: 200
-    scale_h: 200
+    description: "屏幕边缘红色闪烁，被击中时"
+    color: "#FF0000"
     duration: 0.3
+    opacity: 0.4
 
-  - name: money_rain
+  - name: glass_shatter
     type: image
-    path: "effects/money.png"
-    scale_w: 100
-    scale_h: 100
-    duration: 1.0
+    description: "玻璃碎裂叠加，受重伤/被爆头时"
+    scale_w: 600
+    scale_h: 400
+    duration: 0.5
+
+  # 撤离成功特效
+  - name: extract_success
+    type: text_popup
+    description: "撤离成功大字特效"
+    content: "撤离成功！"
+    font_size: 48
+    font_color: "#00FF44"
+    duration: 1.5
